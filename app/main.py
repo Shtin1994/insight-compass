@@ -1,8 +1,17 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, Depends # Добавили Depends
+from sqlalchemy.ext.asyncio import AsyncSession # Добавили AsyncSession
+from sqlalchemy.sql import text # Добавили text для сырого SQL
 from app.core.config import settings
-from app.tasks import simple_debug_task, add # Импортируем наши задачи из tasks.py
+from app.tasks import simple_debug_task, add
+from app.db.session import get_async_db, ASYNC_DATABASE_URL # Импортируем нашу зависимость и URL
 
 app = FastAPI(title=settings.PROJECT_NAME)
+
+@app.on_event("startup")
+async def startup_event():
+    print(f"FastAPI приложение запущено! DB URL: {settings.DATABASE_URL}")
+    print(f"FastAPI Async DB URL: {ASYNC_DATABASE_URL}")
+
 
 @app.get("/")
 async def root():
@@ -12,50 +21,38 @@ async def root():
 async def health_check():
     return {"status": "OK", "project_name": settings.PROJECT_NAME}
 
-# НОВЫЙ ЭНДПОИНТ для тестирования Celery задачи
-@app.post("/test-celery-task/")
-async def test_celery(message: str, background_tasks: BackgroundTasks):
-    """
-    Тестовый эндпоинт для отправки задачи Celery.
-    Использует BackgroundTasks для немедленного ответа, пока задача обрабатывается в фоне.
-    """
-    # Отправляем задачу в Celery.
-    # .delay() - это шорткат для .send_task() с текущими настройками.
-    task_result_async = simple_debug_task.delay(message)
-    
-    # Для получения результата задачи (если нужно и если backend настроен):
-    # task_id = task_result_async.id
-    # print(f"Задача simple_debug_task отправлена с ID: {task_id}")
-    # Через некоторое время можно будет проверить результат по ID:
-    # from app.celery_app import celery_instance
-    # result = celery_instance.AsyncResult(task_id)
-    # if result.ready():
-    #     print(f"Результат задачи {task_id}: {result.get(timeout=1)}")
-    # else:
-    #     print(f"Задача {task_id} еще не выполнена, статус: {result.status}")
+# НОВЫЙ ЭНДПОИНТ ДЛЯ ПРОВЕРКИ БД
+@app.get("/db-check")
+async def db_check(db: AsyncSession = Depends(get_async_db)):
+    try:
+        # Выполняем простой запрос для проверки соединения
+        result = await db.execute(text("SELECT 1"))
+        value = result.scalar_one_or_none()
+        if value == 1:
+            return {"db_status": "OK", "message": "Успешное подключение к базе данных и выполнение запроса."}
+        else:
+            return {"db_status": "ERROR", "message": "Запрос 'SELECT 1' вернул не 1."}
+    except Exception as e:
+        return {"db_status": "ERROR", "message": f"Ошибка подключения к базе данных: {str(e)}"}
 
-    # Мы также можем использовать FastAPI BackgroundTasks для задач, которые не требуют
-    # отдельного worker'а, но для Celery это не нужно.
-    # Здесь background_tasks не используется, но оставлен для примера.
-    
+
+@app.post("/test-celery-task/")
+async def test_celery(message: str): # Убрал BackgroundTasks, т.к. не используется
+    task_result_async = simple_debug_task.delay(message)
     return {
         "message": "Celery задача отправлена!", 
-        "task_info": f"Задача simple_debug_task с сообщением '{message}' поставлена в очередь."
-        # "task_id": task_id # Можно вернуть ID задачи, если нужно
+        "task_info": f"Задача simple_debug_task с сообщением '{message}' поставлена в очередь.",
+        "task_id": task_result_async.id
     }
 
 @app.post("/test-add-task/")
 async def test_add(x: int, y: int):
-    """
-    Тестовый эндпоинт для отправки задачи сложения в Celery.
-    """
     task_add_result_async = add.delay(x, y)
     return {
         "message": "Задача сложения отправлена в Celery!",
-        "task_id": task_add_result_async.id # Возвращаем ID задачи, чтобы потом можно было проверить результат
+        "task_id": task_add_result_async.id
     }
 
-# Опционально: эндпоинт для проверки статуса задачи
 @app.get("/task-status/{task_id}")
 async def get_task_status(task_id: str):
     from app.celery_app import celery_instance
@@ -70,11 +67,9 @@ async def get_task_status(task_id: str):
         if task_result.successful():
             response["result"] = task_result.get()
         else:
-            response["error"] = str(task_result.info) # или task_result.traceback
+            response["error"] = str(task_result.info)
     return response
 
-
-# Для запуска uvicorn напрямую (если не через Docker)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=settings.APP_HOST, port=settings.APP_PORT, reload=True)
