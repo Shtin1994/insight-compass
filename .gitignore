@@ -112,3 +112,6 @@ docker-compose.yml.override # Если будете использовать д�
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Telethon session files
+*.session
