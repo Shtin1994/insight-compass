@@ -5,7 +5,6 @@ psycopg2-binary
 redis
 telethon
 celery[redis]
-gevent
 sqlalchemy[asyncio]  # SQLAlchemy с поддержкой asyncio
 alembic              # Для миграций базы данных
 asyncpg              # Асинхронный драйвер для PostgreSQL, используется SQLAlchemy[asyncio]

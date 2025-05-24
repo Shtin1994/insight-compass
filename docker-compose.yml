@@ -77,7 +77,7 @@ services:
     restart: unless-stopped
     # Изменяем рабочую директорию и команду:
     working_dir: / # Устанавливаем рабочую директорию в корень контейнера
-    command: celery -A app.celery_app worker -l INFO -P gevent # Теперь app.celery_app будет найдено
+    command: celery -A app.celery_app worker -l INFO # Теперь app.celery_app будет найдено
     volumes:
       - ./app:/app # Монтируем нашу папку app в /app внутри контейнера
       - ./.env:/app/.env:ro # Монтируем .env файл в /app/.env только для чтения (ro)

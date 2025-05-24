@@ -2,9 +2,9 @@ from fastapi import FastAPI, Depends # Добавили Depends
 from sqlalchemy.ext.asyncio import AsyncSession # Добавили AsyncSession
 from sqlalchemy.sql import text # Добавили text для сырого SQL
 from app.core.config import settings
-from app.tasks import simple_debug_task, add
 from app.db.session import get_async_db, ASYNC_DATABASE_URL # Импортируем нашу зависимость и URL
-
+# Добавляем новый таск в импорты из app.tasks
+from app.tasks import simple_debug_task, add, collect_telegram_data_task 
 app = FastAPI(title=settings.PROJECT_NAME)
 
 @app.on_event("startup")
@@ -20,6 +20,17 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "OK", "project_name": settings.PROJECT_NAME}
+
+@app.post("/collect-data-now/")
+async def trigger_collect_data():
+    """
+    Запускает Celery таск для сбора данных из Telegram.
+    """
+    task_collect_async = collect_telegram_data_task.delay()
+    return {
+        "message": "Задача сбора данных запущена!",
+        "task_id": task_collect_async.id
+    }
 
 # НОВЫЙ ЭНДПОИНТ ДЛЯ ПРОВЕРКИ БД
 @app.get("/db-check")

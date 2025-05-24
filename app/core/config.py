@@ -31,7 +31,16 @@ class Settings(BaseSettings):
 
     # OpenAI API Key (пока опциональный)
     OPENAI_API_KEY: str | None = None
+    
 
+    # Список Telegram-каналов для мониторинга (для MVP)
+    # Можно использовать username или ID канала (если это число)
+    TARGET_TELEGRAM_CHANNELS: list[str] = [
+        "durov",
+        "telegram",
+        "breakingmash", # Пример другого канала
+        "marketplace_hogwarts", # Добавьте сюда еще 1-2 канала для теста
+    ]
     model_config = SettingsConfigDict(env_file_encoding='utf-8', extra='ignore', env_file='/app/.env')
 
 settings = Settings()
