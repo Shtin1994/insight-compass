@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic-settings # <--- ДОБАВЛЕНО для настроек
+psycopg2-binary
+redis
+# telethon
+# openai
+# celery
