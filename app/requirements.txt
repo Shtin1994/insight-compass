@@ -1,8 +1,9 @@
 fastapi
 uvicorn[standard]
-pydantic-settings # <--- ДОБАВЛЕНО для настроек
+pydantic-settings
 psycopg2-binary
 redis
-# telethon
+telethon
+celery[redis]
+gevent # <--- ДОБАВЛЕНО для пула gevent в Celery
 # openai
-# celery

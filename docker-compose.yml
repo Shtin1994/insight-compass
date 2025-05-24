@@ -1,6 +1,5 @@
 services:
   db:
-    # ... (конфигурация db остается без изменений) ...
     image: postgres:15-alpine
     container_name: insight_compass_db
     restart: unless-stopped
@@ -19,7 +18,6 @@ services:
       retries: 5
 
   redis:
-    # ... (конфигурация redis остается без изменений) ...
     image: redis:7-alpine
     container_name: insight_compass_redis
     restart: unless-stopped
@@ -33,41 +31,70 @@ services:
       timeout: 5s
       retries: 5
 
-  api: # <--- НАШ НОВЫЙ СЕРВИС
-    build: # Указываем, что образ нужно собрать из Dockerfile
-      context: ./app # Контекст сборки - папка app/
-      dockerfile: Dockerfile # Имя Dockerfile
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
     container_name: insight_compass_api
     restart: unless-stopped
     ports:
-      - "${APP_PORT:-8000}:8000" # Пробрасываем порт приложения
+      - "${APP_PORT:-8000}:8000"
     volumes:
-      - ./app:/app # Монтируем локальную папку app/ в /app в контейнере.
-                     # Это позволяет видеть изменения кода без пересборки образа (благодаря --reload у Uvicorn).
-    environment: # Передаем переменные окружения из .env файла
+      - ./app:/app
+      - ./.env:/app/.env:ro
+    # ИЗМЕНЕНИЯ ЗДЕСЬ:
+    working_dir: /  # Устанавливаем рабочую директорию в корень
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload # Путь к приложению теперь app.main:app
+    environment:
+      - PYTHONPATH=/app # Явно указываем PYTHONPATH
       - POSTGRES_USER=${POSTGRES_USER:-user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
-      - POSTGRES_HOST=db # Важно: хост БД для приложения - это имя сервиса 'db'
+      - POSTGRES_HOST=db
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
-      - REDIS_HOST=redis # Важно: хост Redis для приложения - это имя сервиса 'redis'
+      - REDIS_HOST=redis
       - REDIS_PORT=${REDIS_PORT:-6379}
       - APP_HOST=${APP_HOST:-0.0.0.0}
       - APP_PORT=${APP_PORT:-8000}
-      # TELEGRAM_API_ID=${TELEGRAM_API_ID} # Добавим позже
-      # TELEGRAM_API_HASH=${TELEGRAM_API_HASH} # Добавим позже
-      # TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN} # Добавим позже
-      # OPENAI_API_KEY=${OPENAI_API_KEY} # Добавим позже
-    depends_on: # Указываем, что наш сервис api зависит от db и redis
+      # Для API пока можно оставить эти переменные закомментированными,
+      # если app/core/config.py их не требует как обязательные при старте API.
+      # - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      # - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      # - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
       db:
-        condition: service_healthy # Запускать api только после того, как db станет healthy
+        condition: service_healthy
       redis:
-        condition: service_healthy # Запускать api только после того, как redis станет healthy
+        condition: service_healthy
+
+  celery_worker:
+    build:
+      context: ./app # Контекст сборки остается ./app
+      dockerfile: Dockerfile
+    container_name: insight_compass_celery_worker
+    restart: unless-stopped
+    # Изменяем рабочую директорию и команду:
+    working_dir: / # Устанавливаем рабочую директорию в корень контейнера
+    command: celery -A app.celery_app worker -l INFO -P gevent # Теперь app.celery_app будет найдено
+    volumes:
+      - ./app:/app # Монтируем нашу папку app в /app внутри контейнера
+      - ./.env:/app/.env:ro # Монтируем .env файл в /app/.env только для чтения (ro)
+    environment:
+      # ... (переменные окружения остаются) ...
+      # Важно! Добавить PYTHONPATH, чтобы Python находил модули внутри /app
+      PYTHONPATH: /app
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
 
 volumes:
   postgres_data:
   redis_data:
 
-# networks: # Можно будет настроить позже, если потребуется более сложная сетевая конфигурация
+# networks:
 #   app_network:
 #     driver: bridge

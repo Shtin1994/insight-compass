@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # OPENAI_API_KEY: str
 
     # Для pydantic-settings v2.x
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(env_file_encoding='utf-8', extra='ignore', env_file='/app/.env')
 
 # Создаем экземпляр настроек, который будет использоваться в приложении
 settings = Settings()
