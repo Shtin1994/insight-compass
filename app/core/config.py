@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     TELEGRAM_API_HASH: str | None = None
     TELEGRAM_BOT_TOKEN: str | None = None # Пока не используется активно в tasks.py, но может понадобиться
     TELEGRAM_PHONE_NUMBER_FOR_LOGIN: str | None = None
+    TELEGRAM_TARGET_CHAT_ID: str | None = None # ID чата/пользователя для отправки дайджесто
 
     # OpenAI API Key
     OPENAI_API_KEY: str | None = None # Пока не используется
