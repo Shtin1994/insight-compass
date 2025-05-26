@@ -1,167 +1,146 @@
-# --- START OF FILE app/main.py (Updated with Digest Trigger) ---
+# app/main.py
 
-from fastapi import FastAPI, Depends, HTTPException, status # Добавил HTTPException, status
+import asyncio
+import logging
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import text
+from sqlalchemy import select, func, desc, asc
 
-from app.core.config import settings
-from app.db.session import get_async_db, ASYNC_DATABASE_URL
+from . import tasks, models
+from .db.session import get_async_db, async_engine 
+# ИЗМЕНЕНО: импортируем celery_app вместо celery_worker
+from .celery_app import celery_app 
+from .core.config import settings
+from .models import Base 
+from .schemas import ui_schemas
 
-# Обновляем импорт задач, добавляя send_daily_digest_task
-from app.tasks import (
-    simple_debug_task, 
-    add, 
-    collect_telegram_data_task, 
-    summarize_top_posts_task,
-    send_daily_digest_task # <--- НОВАЯ ЗАДАЧА ДАЙДЖЕСТА ДОБАВЛЕНА В ИМПОРТ
-)
-from app.celery_app import celery_instance
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    description="API для Инсайт-Компаса - AI-помощника для анализа Telegram-каналов.",
-    version="0.1.0"
-)
-
-@app.on_event("startup")
-async def startup_event():
-    print(f"FastAPI приложение '{settings.PROJECT_NAME}' запущено!")
-    print(f"  Синхронный DB URL (используется Alembic): {settings.DATABASE_URL}")
-    print(f"  Асинхронный DB URL (используется приложением): {ASYNC_DATABASE_URL}")
-    print(f"  OpenAI API Key загружен: {'Да' if settings.OPENAI_API_KEY else 'Нет (проверьте .env)'}")
-    print(f"  Telegram Bot Token загружен: {'Да' if settings.TELEGRAM_BOT_TOKEN else 'Нет (проверьте .env)'}")
-    print(f"  Telegram Target Chat ID: {settings.TELEGRAM_TARGET_CHAT_ID if settings.TELEGRAM_TARGET_CHAT_ID else 'Не указан (проверьте .env)'}")
+app = FastAPI(title="Insight Compass API", version="0.1.0")
 
 
-@app.get("/", tags=["Root"])
-async def root():
-    return {"message": f"Добро пожаловать в {settings.PROJECT_NAME}!"}
-
-@app.get("/health", tags=["Utilities"])
-async def health_check():
-    return {"status": "OK", "project_name": settings.PROJECT_NAME, "version": app.version}
-
-@app.get("/db-check", tags=["Utilities"])
-async def db_check(db: AsyncSession = Depends(get_async_db)):
+@app.get("/api/v1/posts/", response_model=ui_schemas.PaginatedPostsResponse)
+async def get_posts_for_ui(
+    skip: int = Query(0, ge=0, description="Number of posts to skip"), 
+    limit: int = Query(10, ge=1, le=100, description="Number of posts to return per page"), 
+    db: AsyncSession = Depends(get_async_db)
+):
+    """
+    Получает список постов для отображения в UI с пагинацией.
+    Посты отсортированы по дате публикации (сначала новые).
+    """
     try:
-        result = await db.execute(text("SELECT 1"))
-        value = result.scalar_one_or_none()
-        if value == 1:
-            return {"db_status": "OK", "message": "Успешное подключение к базе данных."}
-        else:
-            return {"db_status": "ERROR", "message": "Запрос 'SELECT 1' не вернул ожидаемое значение."}
+        total_posts_stmt = select(func.count(models.Post.id))
+        total_posts_result = await db.execute(total_posts_stmt)
+        total_posts = total_posts_result.scalar_one_or_none() or 0
+
+        posts_stmt = (
+            select(models.Post)
+            .join(models.Post.channel) 
+            .order_by(desc(models.Post.post_date))
+            .offset(skip)
+            .limit(limit)
+        )
+        
+        results = await db.execute(posts_stmt)
+        posts_scalars = results.scalars().all()
+        
+        posts_list = [ui_schemas.PostListItem.model_validate(post) for post in posts_scalars]
+
+        return ui_schemas.PaginatedPostsResponse(total_posts=total_posts, posts=posts_list)
     except Exception as e:
-        return {"db_status": "ERROR", "message": f"Ошибка подключения к базе данных: {str(e)}"}
+        logger.error(f"Error fetching posts for UI: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching posts")
 
 
-# --- Эндпоинты для запуска Celery задач ---
-
-@app.post("/collect-data-now/", tags=["Data Collection Tasks"], status_code=status.HTTP_202_ACCEPTED)
-async def trigger_collect_data():
-    task_collect_async = collect_telegram_data_task.delay()
-    return {
-        "message": "Задача сбора данных из Telegram запущена!",
-        "task_id": task_collect_async.id
-    }
-
-@app.post("/summarize-posts-now/", tags=["AI Analysis Tasks"], status_code=status.HTTP_202_ACCEPTED)
-async def trigger_summarize_posts(hours_ago: int = 48, top_n: int = 3):
-    if not settings.OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
-            detail="OpenAI API Key не настроен. Суммаризация невозможна."
-        )
-    task_summarize_async = summarize_top_posts_task.delay(hours_ago=hours_ago, top_n=top_n)
-    return {
-        "message": f"Задача AI суммаризации топ-{top_n} постов за последние {hours_ago}ч запущена!",
-        "task_id": task_summarize_async.id
-    }
-
-# НОВЫЙ ЭНДПОИНТ ДЛЯ ЗАПУСКА ОТПРАВКИ ДАЙДЖЕСТА
-@app.post("/send-digest-now/", tags=["Digest Tasks"], status_code=status.HTTP_202_ACCEPTED)
-async def trigger_send_digest(hours_ago_posts: int = 24, top_n_summarized: int = 3):
+def get_comment_author_display_name(comment: models.Comment) -> str:
     """
-    Асинхронно запускает Celery задачу для формирования и отправки Telegram-дайджеста.
-    
-    - **hours_ago_posts**: За какой период в часах назад от текущего времени выбирать посты для статистики и топа.
-    - **top_n_summarized**: Количество самых обсуждаемых постов для включения в дайджест.
-    
-    Возвращает ID запущенной задачи.
+    Формирует отображаемое имя автора комментария.
     """
-    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_TARGET_CHAT_ID:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
-            detail="TELEGRAM_BOT_TOKEN или TELEGRAM_TARGET_CHAT_ID не настроены. Отправка дайджеста невозможна."
+    if comment.username:
+        return comment.username
+    if comment.first_name and comment.last_name:
+        return f"{comment.first_name} {comment.last_name}"
+    if comment.first_name:
+        return comment.first_name
+    if comment.last_name: 
+        return comment.last_name
+    if comment.user_id:
+        return f"User_{str(comment.user_id)}"
+    return "Unknown Author"
+
+@app.get("/api/v1/posts/{post_id}/comments/", response_model=ui_schemas.PaginatedCommentsResponse)
+async def get_comments_for_post_ui(
+    post_id: int,
+    skip: int = Query(0, ge=0, description="Number of comments to skip"),
+    limit: int = Query(10, ge=1, le=100, description="Number of comments to return per page"),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """
+    Получает список комментариев для конкретного поста с пагинацией.
+    Комментарии отсортированы по дате публикации (сначала старые).
+    """
+    try:
+        post_exists_stmt = select(models.Post).where(models.Post.id == post_id)
+        post_result = await db.execute(post_exists_stmt)
+        post = post_result.scalar_one_or_none()
+        if not post:
+            raise HTTPException(status_code=404, detail=f"Post with ID {post_id} not found")
+
+        total_comments_stmt = select(func.count(models.Comment.id)).where(models.Comment.post_id == post_id)
+        total_comments_result = await db.execute(total_comments_stmt)
+        total_comments = total_comments_result.scalar_one_or_none() or 0
+
+        comments_stmt = (
+            select(models.Comment)
+            .where(models.Comment.post_id == post_id)
+            .order_by(asc(models.Comment.comment_date)) 
+            .offset(skip)
+            .limit(limit)
         )
-        
-    # Используем .send_task для асинхронных задач Celery, если хотим быть уверены,
-    # что они будут выполнены асинхронно, даже если сама задача определена как async def.
-    # .delay() тоже должен работать, но send_task более явный для async задач.
-    # В данном случае, так как send_daily_digest_task уже async, .delay() будет работать корректно.
-    task_digest_async = send_daily_digest_task.delay(hours_ago_posts=hours_ago_posts, top_n_summarized=top_n_summarized)
-    # Альтернативно:
-    # task_digest_async = celery_instance.send_task(
-    #     "send_daily_digest", 
-    #     args=[hours_ago_posts, top_n_summarized]
-    # )
-    
-    return {
-        "message": f"Задача отправки Telegram-дайджеста (посты за {hours_ago_posts}ч, топ-{top_n_summarized}) запущена!",
-        "task_id": task_digest_async.id
-    }
+        comments_results = await db.execute(comments_stmt)
+        comments_scalars = comments_results.scalars().all()
 
-# --- Тестовые эндпоинты для Celery ---
+        comments_list = []
+        for comment_model in comments_scalars:
+            author_name = get_comment_author_display_name(comment_model)
+            comment_data = ui_schemas.CommentListItem(
+                id=comment_model.id,
+                author_display_name=author_name,
+                text=comment_model.text,
+                comment_date=comment_model.comment_date
+            )
+            comments_list.append(comment_data)
 
-@app.post("/test-celery-debug-task/", tags=["Test Celery Tasks"], status_code=status.HTTP_202_ACCEPTED)
-async def test_celery_debug(message: str = "Привет от FastAPI!"):
-    task_result_async = simple_debug_task.delay(message)
-    return {
-        "message": "Тестовая отладочная Celery задача отправлена!",
-        "task_info": f"Задача simple_debug_task с сообщением '{message}' поставлена в очередь.",
-        "task_id": task_result_async.id
-    }
+        return ui_schemas.PaginatedCommentsResponse(total_comments=total_comments, comments=comments_list)
+    except HTTPException: 
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching comments for post {post_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error while fetching comments for post {post_id}")
 
-@app.post("/test-celery-add-task/", tags=["Test Celery Tasks"], status_code=status.HTTP_202_ACCEPTED)
-async def test_celery_add(x: int = 5, y: int = 7):
-    task_add_result_async = add.delay(x, y)
-    return {
-        "message": "Задача сложения отправлена в Celery!",
-        "task_id": task_add_result_async.id
-    }
 
-@app.get("/task-status/{task_id}", tags=["Utilities"])
-async def get_task_status_endpoint(task_id: str): # Переименовал для избежания конфликта имен
-    task_result = celery_instance.AsyncResult(task_id)
-    
-    response = {
-        "task_id": task_id,
-        "status": task_result.status,
-        "ready": task_result.ready(),
-    }
-    if task_result.ready():
-        if task_result.successful():
-            response["result"] = task_result.get()
-        elif task_result.failed():
-            try:
-                task_result.get(propagate=False) 
-                response["error_info"] = str(task_result.info) if task_result.info else "Неизвестная ошибка"
-                response["traceback"] = task_result.traceback
-            except Exception as e:
-                response["error_info"] = f"Исключение при получении результата задачи: {str(e)}"
-                response["traceback"] = task_result.traceback
-    elif task_result.status == 'STARTED':
-        response["meta"] = task_result.info 
-        
-    return response
+@app.post("/run-collection-task/", summary="Запустить задачу сбора данных из Telegram")
+async def run_collection_task_endpoint(background_tasks: BackgroundTasks):
+    logger.info("Endpoint /run-collection-task/ called. Adding task to background.")
+    tasks.collect_telegram_data_task.delay()
+    return {"message": "Задача сбора данных запущена в фоновом режиме."}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app", 
-        host=settings.APP_HOST, 
-        port=settings.APP_PORT, 
-        reload=True,
-        log_level="info"
-    )
+@app.post("/run-summarization-task/", summary="Запустить задачу суммаризации топ постов")
+async def run_summarization_task_endpoint(background_tasks: BackgroundTasks):
+    logger.info("Endpoint /run-summarization-task/ called. Adding task to background.")
+    tasks.summarize_top_posts_task.delay()
+    return {"message": "Задача суммаризации топ постов запущена в фоновом режиме."}
 
-# --- END OF FILE app/main.py (Updated with Digest Trigger) ---
+@app.post("/run-daily-digest-task/", summary="Запустить задачу отправки ежедневного дайджеста")
+async def run_daily_digest_task_endpoint(background_tasks: BackgroundTasks):
+    logger.info("Endpoint /run-daily-digest-task/ called. Adding task to background.")
+    tasks.send_daily_digest_task.delay()
+    return {"message": "Задача отправки ежедневного дайджеста запущена в фоновом режиме."}
+
+@app.get("/")
+async def root():
+    return {"message": "Welcome to Insight Compass API"}
