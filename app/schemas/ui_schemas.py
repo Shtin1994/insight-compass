@@ -2,46 +2,41 @@
 
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional # Убедитесь, что List импортирован
+from typing import List, Optional
 
-# Схема для отображения канала в посте
 class ChannelInfo(BaseModel):
     id: int
-    name: str
+    title: str  # Соответствует модели Channel.title
     username: Optional[str] = None
 
     class Config:
         from_attributes = True
 
-# Схема для отображения поста в списке
 class PostListItem(BaseModel):
     id: int
     channel: ChannelInfo 
-    text: str
-    post_date: datetime
+    post_text: Optional[str] = None # Соответствует модели Post.post_text
+    posted_at: datetime            # Соответствует модели Post.posted_at
     comments_count: int
-    url: str
+    link: str                      # Соответствует модели Post.link
     summary_text: Optional[str] = None
 
     class Config:
         from_attributes = True
 
-# Схема для ответа API со списком постов и пагинацией
 class PaginatedPostsResponse(BaseModel):
     total_posts: int
     posts: List[PostListItem]
 
-# Схема для отображения комментария (НОВОЕ)
 class CommentListItem(BaseModel):
     id: int
-    author_display_name: str # Будем формировать на бэкенде
-    text: str
-    comment_date: datetime
+    author_display_name: str # Формируется в main.py
+    text: str                # В это поле будет передаваться значение из Comment.content
+    commented_at: datetime   # Соответствует модели Comment.commented_at
 
     class Config:
         from_attributes = True
 
-# Схема для ответа API со списком комментариев и пагинацией (НОВОЕ)
 class PaginatedCommentsResponse(BaseModel):
     total_comments: int
     comments: List[CommentListItem]

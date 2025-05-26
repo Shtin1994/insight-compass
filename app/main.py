@@ -7,20 +7,36 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, asc
+from sqlalchemy.orm import selectinload 
 
-from . import tasks, models
+from . import tasks
+from .models import Post, Comment, Channel 
+from . import models as models_module 
+
 from .db.session import get_async_db, async_engine 
-# ИЗМЕНЕНО: импортируем celery_app вместо celery_worker
-from .celery_app import celery_app 
+from .celery_app import celery_instance 
 from .core.config import settings
-from .models import Base 
 from .schemas import ui_schemas
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+endpoint_logger = logging.getLogger("api_endpoints") 
+endpoint_logger.setLevel(logging.DEBUG) 
+
+if not endpoint_logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    endpoint_logger.addHandler(handler)
 
 app = FastAPI(title="Insight Compass API", version="0.1.0")
 
+def get_comment_author_display_name(comment: Comment) -> str: 
+    if hasattr(comment, 'author_signature') and comment.author_signature:
+        return comment.author_signature
+    if hasattr(comment, 'author_id') and comment.author_id:
+        return f"User_{str(comment.author_id)}"
+    return "Unknown Author"
 
 @app.get("/api/v1/posts/", response_model=ui_schemas.PaginatedPostsResponse)
 async def get_posts_for_ui(
@@ -28,49 +44,33 @@ async def get_posts_for_ui(
     limit: int = Query(10, ge=1, le=100, description="Number of posts to return per page"), 
     db: AsyncSession = Depends(get_async_db)
 ):
-    """
-    Получает список постов для отображения в UI с пагинацией.
-    Посты отсортированы по дате публикации (сначала новые).
-    """
+    endpoint_logger.info(f"GET /api/v1/posts/ - skip={skip}, limit={limit}")
     try:
-        total_posts_stmt = select(func.count(models.Post.id))
+        CurrentPostModel = models_module.Post 
+        total_posts_stmt = select(func.count(CurrentPostModel.id)) 
         total_posts_result = await db.execute(total_posts_stmt)
         total_posts = total_posts_result.scalar_one_or_none() or 0
+        endpoint_logger.debug(f"Total posts count: {total_posts}")
 
         posts_stmt = (
-            select(models.Post)
-            .join(models.Post.channel) 
-            .order_by(desc(models.Post.post_date))
+            select(CurrentPostModel)
+            .options(selectinload(CurrentPostModel.channel)) 
+            .order_by(desc(CurrentPostModel.posted_at)) 
             .offset(skip)
             .limit(limit)
         )
-        
         results = await db.execute(posts_stmt)
-        posts_scalars = results.scalars().all()
+        posts_scalars = results.scalars().unique().all()
+        endpoint_logger.debug(f"Fetched {len(posts_scalars)} posts.")
         
         posts_list = [ui_schemas.PostListItem.model_validate(post) for post in posts_scalars]
-
+        endpoint_logger.debug("Successfully validated posts for PostListItem.")
         return ui_schemas.PaginatedPostsResponse(total_posts=total_posts, posts=posts_list)
     except Exception as e:
-        logger.error(f"Error fetching posts for UI: {e}", exc_info=True)
+        endpoint_logger.error(f"Error in get_posts_for_ui: {e}", exc_info=True)
+        if hasattr(e, 'errors') and callable(e.errors):
+             endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
         raise HTTPException(status_code=500, detail="Internal server error while fetching posts")
-
-
-def get_comment_author_display_name(comment: models.Comment) -> str:
-    """
-    Формирует отображаемое имя автора комментария.
-    """
-    if comment.username:
-        return comment.username
-    if comment.first_name and comment.last_name:
-        return f"{comment.first_name} {comment.last_name}"
-    if comment.first_name:
-        return comment.first_name
-    if comment.last_name: 
-        return comment.last_name
-    if comment.user_id:
-        return f"User_{str(comment.user_id)}"
-    return "Unknown Author"
 
 @app.get("/api/v1/posts/{post_id}/comments/", response_model=ui_schemas.PaginatedCommentsResponse)
 async def get_comments_for_post_ui(
@@ -79,50 +79,55 @@ async def get_comments_for_post_ui(
     limit: int = Query(10, ge=1, le=100, description="Number of comments to return per page"),
     db: AsyncSession = Depends(get_async_db)
 ):
-    """
-    Получает список комментариев для конкретного поста с пагинацией.
-    Комментарии отсортированы по дате публикации (сначала старые).
-    """
+    endpoint_logger.info(f"GET /api/v1/posts/{post_id}/comments/ - skip={skip}, limit={limit}")
     try:
-        post_exists_stmt = select(models.Post).where(models.Post.id == post_id)
+        CurrentPostModel = models_module.Post
+        CurrentCommentModel = models_module.Comment
+
+        post_exists_stmt = select(CurrentPostModel).where(CurrentPostModel.id == post_id) 
         post_result = await db.execute(post_exists_stmt)
         post = post_result.scalar_one_or_none()
         if not post:
+            endpoint_logger.warning(f"Post with ID {post_id} not found.")
             raise HTTPException(status_code=404, detail=f"Post with ID {post_id} not found")
+        endpoint_logger.debug(f"Post {post_id} found.")
 
-        total_comments_stmt = select(func.count(models.Comment.id)).where(models.Comment.post_id == post_id)
+        total_comments_stmt = select(func.count(CurrentCommentModel.id)).where(CurrentCommentModel.post_id == post_id) 
         total_comments_result = await db.execute(total_comments_stmt)
         total_comments = total_comments_result.scalar_one_or_none() or 0
+        endpoint_logger.debug(f"Total comments count for post {post_id}: {total_comments}")
 
         comments_stmt = (
-            select(models.Comment)
-            .where(models.Comment.post_id == post_id)
-            .order_by(asc(models.Comment.comment_date)) 
+            select(CurrentCommentModel) 
+            .where(CurrentCommentModel.post_id == post_id) 
+            .order_by(asc(CurrentCommentModel.commented_at)) 
             .offset(skip)
             .limit(limit)
         )
         comments_results = await db.execute(comments_stmt)
-        comments_scalars = comments_results.scalars().all()
+        comments_scalars = comments_results.scalars().all() 
+        endpoint_logger.debug(f"Fetched {len(comments_scalars)} comments for post {post_id}.")
 
         comments_list = []
-        for comment_model in comments_scalars:
-            author_name = get_comment_author_display_name(comment_model)
+        for comment_model_instance in comments_scalars: 
+            author_name = get_comment_author_display_name(comment_model_instance) 
             comment_data = ui_schemas.CommentListItem(
-                id=comment_model.id,
+                id=comment_model_instance.id,
                 author_display_name=author_name,
-                text=comment_model.text,
-                comment_date=comment_model.comment_date
+                # ИСПРАВЛЕНО НАКОНЕЦ: comment_model_instance.text_content
+                text=comment_model_instance.text_content, 
+                commented_at=comment_model_instance.commented_at
             )
             comments_list.append(comment_data)
-
+        endpoint_logger.debug(f"Successfully validated comments for CommentListItem.")
         return ui_schemas.PaginatedCommentsResponse(total_comments=total_comments, comments=comments_list)
-    except HTTPException: 
-        raise
     except Exception as e:
-        logger.error(f"Error fetching comments for post {post_id}: {e}", exc_info=True)
+        endpoint_logger.error(f"Error in get_comments_for_post_ui (post_id={post_id}): {e}", exc_info=True)
+        if hasattr(e, 'errors') and callable(e.errors):
+             endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
         raise HTTPException(status_code=500, detail=f"Internal server error while fetching comments for post {post_id}")
 
-
+# ... (остальные эндпоинты POST и GET / без изменений) ...
 @app.post("/run-collection-task/", summary="Запустить задачу сбора данных из Telegram")
 async def run_collection_task_endpoint(background_tasks: BackgroundTasks):
     logger.info("Endpoint /run-collection-task/ called. Adding task to background.")
