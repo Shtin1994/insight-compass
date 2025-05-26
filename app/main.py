@@ -18,16 +18,28 @@ from .celery_app import celery_instance
 from .core.config import settings
 from .schemas import ui_schemas
 
-logging.basicConfig(level=logging.INFO)
+# Основной логгер приложения
+logging.basicConfig(level=logging.INFO) # Общий уровень INFO
 logger = logging.getLogger(__name__)
-endpoint_logger = logging.getLogger("api_endpoints") 
-endpoint_logger.setLevel(logging.DEBUG) 
 
-if not endpoint_logger.hasHandlers():
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    endpoint_logger.addHandler(handler)
+# Логгер для эндпоинтов
+endpoint_logger = logging.getLogger("api_endpoints") 
+endpoint_logger.setLevel(logging.INFO) # Устанавливаем уровень INFO для endpoint_logger
+
+# Убедимся, что у логгера есть обработчик, чтобы он выводил сообщения
+if not endpoint_logger.handlers and not logging.getLogger().handlers:
+    # Если ни у endpoint_logger, ни у корневого логгера нет обработчиков, добавим свой.
+    # Это актуально, если logging.basicConfig не сработал должным образом или был переопределен.
+    # Обычно в Docker логи uvicorn уже настроены, и это может быть излишним,
+    # но для надежности оставим.
+    _handler = logging.StreamHandler()
+    _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    _handler.setFormatter(_formatter)
+    endpoint_logger.addHandler(_handler)
+elif not endpoint_logger.handlers and endpoint_logger.parent and endpoint_logger.parent.handlers:
+    # Если у родительского логгера есть обработчики, наш их унаследует, если propagate=True (по умолчанию)
+    pass
+
 
 app = FastAPI(title="Insight Compass API", version="0.1.0")
 
@@ -50,7 +62,6 @@ async def get_posts_for_ui(
         total_posts_stmt = select(func.count(CurrentPostModel.id)) 
         total_posts_result = await db.execute(total_posts_stmt)
         total_posts = total_posts_result.scalar_one_or_none() or 0
-        endpoint_logger.debug(f"Total posts count: {total_posts}")
 
         posts_stmt = (
             select(CurrentPostModel)
@@ -61,14 +72,13 @@ async def get_posts_for_ui(
         )
         results = await db.execute(posts_stmt)
         posts_scalars = results.scalars().unique().all()
-        endpoint_logger.debug(f"Fetched {len(posts_scalars)} posts.")
         
         posts_list = [ui_schemas.PostListItem.model_validate(post) for post in posts_scalars]
-        endpoint_logger.debug("Successfully validated posts for PostListItem.")
+        endpoint_logger.info(f"Returning {len(posts_list)} posts, total count: {total_posts}.")
         return ui_schemas.PaginatedPostsResponse(total_posts=total_posts, posts=posts_list)
     except Exception as e:
         endpoint_logger.error(f"Error in get_posts_for_ui: {e}", exc_info=True)
-        if hasattr(e, 'errors') and callable(e.errors):
+        if hasattr(e, 'errors') and callable(e.errors): # Для ValidationError Pydantic
              endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
         raise HTTPException(status_code=500, detail="Internal server error while fetching posts")
 
@@ -88,14 +98,12 @@ async def get_comments_for_post_ui(
         post_result = await db.execute(post_exists_stmt)
         post = post_result.scalar_one_or_none()
         if not post:
-            endpoint_logger.warning(f"Post with ID {post_id} not found.")
+            endpoint_logger.warning(f"Post with ID {post_id} not found for comments.")
             raise HTTPException(status_code=404, detail=f"Post with ID {post_id} not found")
-        endpoint_logger.debug(f"Post {post_id} found.")
 
         total_comments_stmt = select(func.count(CurrentCommentModel.id)).where(CurrentCommentModel.post_id == post_id) 
         total_comments_result = await db.execute(total_comments_stmt)
         total_comments = total_comments_result.scalar_one_or_none() or 0
-        endpoint_logger.debug(f"Total comments count for post {post_id}: {total_comments}")
 
         comments_stmt = (
             select(CurrentCommentModel) 
@@ -106,7 +114,6 @@ async def get_comments_for_post_ui(
         )
         comments_results = await db.execute(comments_stmt)
         comments_scalars = comments_results.scalars().all() 
-        endpoint_logger.debug(f"Fetched {len(comments_scalars)} comments for post {post_id}.")
 
         comments_list = []
         for comment_model_instance in comments_scalars: 
@@ -114,12 +121,11 @@ async def get_comments_for_post_ui(
             comment_data = ui_schemas.CommentListItem(
                 id=comment_model_instance.id,
                 author_display_name=author_name,
-                # ИСПРАВЛЕНО НАКОНЕЦ: comment_model_instance.text_content
                 text=comment_model_instance.text_content, 
                 commented_at=comment_model_instance.commented_at
             )
             comments_list.append(comment_data)
-        endpoint_logger.debug(f"Successfully validated comments for CommentListItem.")
+        endpoint_logger.info(f"Returning {len(comments_list)} comments for post {post_id}, total count: {total_comments}.")
         return ui_schemas.PaginatedCommentsResponse(total_comments=total_comments, comments=comments_list)
     except Exception as e:
         endpoint_logger.error(f"Error in get_comments_for_post_ui (post_id={post_id}): {e}", exc_info=True)
