@@ -1,6 +1,7 @@
-# --- START OF FILE app/tasks.py (Corrected NameError and Markdown) ---
+# --- START OF FILE app/tasks.py (Corrected Initial Fetch Logic) ---
 
 import asyncio
+# ... (остальные импорты как в предыдущей версии) ...
 import os
 import time
 import traceback
@@ -18,9 +19,8 @@ import telegram
 from telegram.constants import ParseMode
 from telegram import helpers 
 
-# Импортируем конкретные ошибки Telethon
 from telethon.errors import FloodWaitError
-from telethon.errors.rpcerrorlist import MsgIdInvalidError # <--- ДОБАВЛЕН ИМПОРТ
+from telethon.errors.rpcerrorlist import MsgIdInvalidError
 
 from telethon.tl.types import Message, User
 from telethon import TelegramClient
@@ -28,6 +28,7 @@ from telethon import TelegramClient
 from app.celery_app import celery_instance
 from app.core.config import settings
 from app.models.telegram_data import Channel, Post, Comment
+
 
 # ... (тестовые задачи add, simple_debug_task без изменений) ...
 @celery_instance.task(name="add")
@@ -44,10 +45,10 @@ def simple_debug_task(message: str):
     time.sleep(3)
     return f"Сообщение '{message}' обработано в simple_debug_task"
 
+
 @celery_instance.task(name="collect_telegram_data", bind=True, max_retries=3, default_retry_delay=60)
 def collect_telegram_data_task(self):
     task_start_time = time.time()
-    # ... (начало collect_telegram_data_task без изменений) ...
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (сбор постов и КОММЕНТАРИЕВ)...")
 
     api_id_val = settings.TELEGRAM_API_ID
@@ -100,7 +101,8 @@ def collect_telegram_data_task(self):
                         result_channel = await db_session.execute(stmt_channel)
                         current_channel_db_obj = result_channel.scalar_one_or_none()
 
-                        if not current_channel_db_obj: # ... (код добавления нового канала без изменений) ...
+                        is_first_fetch_for_channel = False
+                        if not current_channel_db_obj:
                             print(f"  Канал '{channel_entity.title}' (ID: {channel_entity.id}) не найден в БД. Добавляем...")
                             new_channel_db_obj_for_add = Channel(
                                 id=channel_entity.id,
@@ -112,36 +114,58 @@ def collect_telegram_data_task(self):
                             db_session.add(new_channel_db_obj_for_add)
                             await db_session.flush() 
                             current_channel_db_obj = new_channel_db_obj_for_add
+                            is_first_fetch_for_channel = True
                             print(f"  Канал '{new_channel_db_obj_for_add.title}' добавлен в сессию БД с ID: {new_channel_db_obj_for_add.id}")
                         else:
                             print(f"  Канал '{channel_entity.title}' уже существует в БД. ID: {current_channel_db_obj.id}")
                         
-                        if current_channel_db_obj: # ... (код сбора постов без изменений) ...
+                        if current_channel_db_obj:
                             print(f"  Начинаем сбор постов для канала '{current_channel_db_obj.title}'...")
-                            initial_min_id_for_channel = current_channel_db_obj.last_processed_post_id or 0
-                            latest_post_id_seen_this_run = initial_min_id_for_channel
-                            MAX_POSTS_PER_ITERATION = settings.POST_FETCH_LIMIT
+                            
+                            iter_messages_params = {
+                                "entity": channel_entity,
+                                "limit": settings.POST_FETCH_LIMIT,
+                                # reverse=False по умолчанию (собирает самые новые первыми)
+                            }
+
+                            if current_channel_db_obj.last_processed_post_id and current_channel_db_obj.last_processed_post_id > 0:
+                                # Последующий сбор: используем min_id для получения только более новых постов
+                                iter_messages_params["min_id"] = current_channel_db_obj.last_processed_post_id
+                                print(f"  Последующий сбор: используем min_id={current_channel_db_obj.last_processed_post_id}.")
+                            elif is_first_fetch_for_channel and settings.INITIAL_POST_FETCH_START_DATETIME:
+                                # Первый сбор с указанной начальной датой: используем offset_date и reverse=True
+                                iter_messages_params["offset_date"] = settings.INITIAL_POST_FETCH_START_DATETIME
+                                iter_messages_params["reverse"] = True # Начинаем со старых от этой даты
+                                print(f"  Первый сбор (с датой): начинаем с offset_date={settings.INITIAL_POST_FETCH_START_DATETIME}, reverse=True.")
+                            else:
+                                # Первый сбор без указанной начальной даты (или last_processed_post_id нет):
+                                # Просто собираем последние N постов (limit уже установлен)
+                                print(f"  Первый сбор (без даты): собираем последние {settings.POST_FETCH_LIMIT} постов.")
+                                # reverse=False уже по умолчанию, limit уже установлен
+
+                            latest_post_id_seen_this_run = current_channel_db_obj.last_processed_post_id or 0
                             total_collected_for_channel_this_run = 0
-                            
-                            print(f"  Запрашиваем посты с Telegram ID > {initial_min_id_for_channel}, лимит на итерацию: {MAX_POSTS_PER_ITERATION}")
-                            
                             temp_posts_buffer_for_db_add: list[Post] = []
 
-                            async for message_tg in tg_client.iter_messages(
-                                entity=channel_entity,
-                                limit=MAX_POSTS_PER_ITERATION, 
-                                min_id=initial_min_id_for_channel
-                            ):
+                            async for message_tg in tg_client.iter_messages(**iter_messages_params):
+                                # ... (остальная логика обработки message_tg и добавления в БД без изменений) ...
                                 message_tg: Message
                                 if not (message_tg.text or message_tg.media): continue
                                 
                                 if message_tg.id > latest_post_id_seen_this_run:
                                     latest_post_id_seen_this_run = message_tg.id
+                                elif not (is_first_fetch_for_channel and settings.INITIAL_POST_FETCH_START_DATETIME and iter_messages_params.get("reverse")):
+                                    # Если это не первый сбор с offset_date и reverse=True, то старые посты не нужны
+                                    # При reverse=True and offset_date, мы можем получать посты старше, чем latest_post_id_seen_this_run,
+                                    # но они все равно новее или равны offset_date, поэтому их нужно обработать.
+                                    # Проверка на существующий пост ниже это отловит.
+                                    pass
+
 
                                 stmt_post_check = select(Post.id).where(Post.telegram_post_id == message_tg.id, Post.channel_id == current_channel_db_obj.id)
                                 result_post_check = await db_session.execute(stmt_post_check)
                                 if result_post_check.scalar_one_or_none() is not None:
-                                    continue
+                                    continue 
 
                                 print(f"    Найден новый пост ID {message_tg.id}. Текст: '{message_tg.text[:50].replace(chr(10),' ') if message_tg.text else '[Медиа]'}'...")
                                 post_link = f"https://t.me/{current_channel_db_obj.username}/{message_tg.id}" if current_channel_db_obj.username else f"https://t.me/c/{current_channel_db_obj.id}/{message_tg.id}"
@@ -167,9 +191,10 @@ def collect_telegram_data_task(self):
                                 db_session.add(current_channel_db_obj)
                                 print(f"    Обновлен last_processed_post_id для канала '{current_channel_db_obj.title}' на {latest_post_id_seen_this_run}.")
                             elif total_collected_for_channel_this_run == 0:
-                                print(f"    Новых постов для канала '{current_channel_db_obj.title}' не найдено (проверено ID > {initial_min_id_for_channel}).")
+                                print(f"    Новых постов для канала '{current_channel_db_obj.title}' не найдено.")
                         
-                        if newly_added_post_objects_in_session: # ... (начало сбора комментариев без изменений) ...
+                        # ... (код сбора комментариев остается без изменений) ...
+                        if newly_added_post_objects_in_session:
                             print(f"  Начинаем сбор комментариев для {len(newly_added_post_objects_in_session)} новых постов...")
                             await db_session.flush()
 
@@ -183,7 +208,7 @@ def collect_telegram_data_task(self):
                                         entity=channel_entity,
                                         limit=COMMENT_FETCH_LIMIT,
                                         reply_to=new_post_db_obj_iter.telegram_post_id
-                                    ): # ... (внутренняя логика цикла по комментариям без изменений) ...
+                                    ):
                                         comment_msg_tg: Message
                                         if not comment_msg_tg.text: continue
 
@@ -231,8 +256,7 @@ def collect_telegram_data_task(self):
                                         db_session.add(new_post_db_obj_iter)
                                         print(f"      Добавлено/обновлено {comments_for_this_post_collected_count} комментариев для поста ID {new_post_db_obj_iter.telegram_post_id}")
                                 
-                                # ИСПРАВЛЕНИЕ NameError: используем импортированную ошибку
-                                except MsgIdInvalidError: # <--- ИЗМЕНЕНО ЗДЕСЬ
+                                except MsgIdInvalidError:
                                     print(f"    Не удалось найти комментарии для поста ID {new_post_db_obj_iter.telegram_post_id} (MsgIdInvalid). Возможно, их нет или они отключены.")
                                 except FloodWaitError as fwe_comment:
                                     print(f"    !!! FloodWaitError при сборе комментариев для поста {new_post_db_obj_iter.telegram_post_id}: ждем {fwe_comment.seconds} секунд.")
@@ -256,7 +280,7 @@ def collect_telegram_data_task(self):
                 print("\nВсе изменения (каналы, посты, комментарии) сохранены в БД.")
             return "Сбор данных (с постами и комментариями) завершен."
 
-        except ConnectionRefusedError as e_auth: 
+        except ConnectionRefusedError as e_auth: # ... (обработка ошибок и finally без изменений) ...
             raise e_auth from e_auth 
         except Exception as e_async_logic:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_collector: {type(e_async_logic).__name__} {e_async_logic}")
@@ -297,9 +321,10 @@ def collect_telegram_data_task(self):
 # --- Конец задачи сбора данных ---
 
 
-# --- Задача AI Суммаризации (остается как есть) ---
+# --- Задача AI Суммаризации (без изменений) ---
 @celery_instance.task(name="summarize_top_posts", bind=True, max_retries=2, default_retry_delay=300)
-def summarize_top_posts_task(self, hours_ago=48, top_n=3): # ... (весь код этой задачи без изменений) ...
+def summarize_top_posts_task(self, hours_ago=48, top_n=3):
+    # ... (код этой задачи остается БЕЗ ИЗМЕНЕНИЙ) ...
     task_start_time = time.time()
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (AI Суммаризация топ-{top_n} постов за {hours_ago}ч)...")
 
@@ -443,12 +468,10 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3): # ... (весь ко�
 # --- Конец задачи AI Суммаризации ---
 
 
-# --- ЗАДАЧА: Отправка ежедневного дайджеста (с последними правками для Markdown и отладки) ---
+# --- ЗАДАЧА: Отправка ежедневного дайджеста (с улучшенной логикой выбора постов) ---
 @celery_instance.task(name="send_daily_digest", bind=True, max_retries=3, default_retry_delay=180)
 def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
-    # ... (начало задачи send_daily_digest_task и _async_send_digest_logic без изменений, как в предыдущем предоставленном мной полном коде) ...
-    # ... (включая все DEBUG принты и экранирование helpers.escape_markdown) ...
-    # Я привожу только финальную часть для ясности, остальное копируйте из предыдущего моего ответа с полным кодом tasks.py
+    # ... (код этой задачи остается БЕЗ ИЗМЕНЕНИЙ по сравнению с предыдущей версией, где мы добавили .where(Post.comments_count > 0) и .where(Post.summary_text != None)) ...
     task_start_time = time.time()
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Отправка ежедневного дайджеста)...")
 
@@ -490,10 +513,13 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                 print(f"DEBUG: new_posts_summary_part = '{new_posts_summary_part}'")
                 message_parts.append(new_posts_summary_part)
 
+                # ОБНОВЛЕННЫЙ ЗАПРОС ДЛЯ ТОП-ПОСТОВ
                 stmt_top_posts = (
                     select(Post.link, Post.comments_count, Post.summary_text, Channel.title.label("channel_title"))
                     .join(Channel, Post.channel_id == Channel.id)
                     .where(Post.posted_at >= time_threshold_posts)
+                    .where(Post.comments_count > 0)         
+                    .where(Post.summary_text != None)       
                     .order_by(desc(Post.comments_count))
                     .limit(top_n_summarized)
                 )
@@ -501,7 +527,7 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                 top_posts_data = result_top_posts.all()
 
                 if top_posts_data:
-                    top_posts_header_part = helpers.escape_markdown(f"\n🔥 Топ-{len(top_posts_data)} самых обсуждаемых постов:\n", version=2)
+                    top_posts_header_part = helpers.escape_markdown(f"\n🔥 Топ-{len(top_posts_data)} обсуждаемых постов с AI-резюме:\n", version=2)
                     print(f"DEBUG: top_posts_header_part = '{top_posts_header_part}'")
                     message_parts.append(top_posts_header_part)
                     
@@ -510,14 +536,13 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                         link_text = "Пост" 
 
                         comments = post_data.comments_count 
-                        summary_text_original = post_data.summary_text or "Резюме пока не готово." 
+                        summary_text_original = post_data.summary_text 
                         summary_escaped = helpers.escape_markdown(summary_text_original, version=2)
                         
                         channel_title_original = post_data.channel_title or "Неизвестный канал"
                         channel_title_escaped = helpers.escape_markdown(channel_title_original, version=2)
                         
                         item_number_str = helpers.escape_markdown(str(i+1), version=2) + "\\."
-
 
                         post_digest_part_str = (
                             f"\n*{item_number_str}* {channel_title_escaped} [{link_text}]({link_url})\n"
@@ -527,7 +552,7 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                         print(f"DEBUG: post_digest_part_str (для поста с link {link_url}) = '{post_digest_part_str}'")
                         message_parts.append(post_digest_part_str)
                 else:
-                    no_top_posts_part = helpers.escape_markdown("\n🔥 Топ обсуждаемых постов не найден (или еще не суммаризированы).", version=2)
+                    no_top_posts_part = helpers.escape_markdown("\n🔥 Нет активно обсуждаемых постов с готовыми резюме за указанный период.\nПопробуйте сначала запустить AI-суммаризацию или дождитесь следующего цикла.\n", version=2)
                     print(f"DEBUG: no_top_posts_part = '{no_top_posts_part}'")
                     message_parts.append(no_top_posts_part)
 
@@ -584,4 +609,4 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
              raise e_task_level_digest from e_task_level_digest
 # --- Конец задачи отправки дайджеста ---
 
-# --- END OF FILE app/tasks.py (Corrected NameError and Markdown) ---
+# --- END OF FILE app/tasks.py (Updated Digest Logic) ---
