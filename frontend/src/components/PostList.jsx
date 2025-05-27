@@ -1,13 +1,14 @@
 // frontend/src/components/PostList.jsx
 
+// ... (импорты как были) ...
 import React, { useState, useEffect } from 'react';
 import PostItem from './PostItem';
 import Pagination from './Pagination';
-import { POSTS_PER_PAGE } from '../config'; // API_BASE_URL больше не нужен здесь напрямую
-// Импортируем сервисную функцию
-import { fetchPostsAPI } from '../services/apiService'; // <--- ИЗМЕНЕНИЕ
+import { POSTS_PER_PAGE } from '../config';
+import { fetchPostsAPI } from '../services/apiService';
 
 function PostList({ onPostSelect }) { 
+  // ... (состояния как были) ...
   const [posts, setPosts] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -15,16 +16,14 @@ function PostList({ onPostSelect }) {
   const [totalPages, setTotalPages] = useState(0);
 
   useEffect(() => {
-    const loadPosts = async () => { // Переименовали для ясности
+    const loadPosts = async () => { 
       setIsLoading(true);
       setError(null);
       try {
-        // Используем сервисную функцию
-        const data = await fetchPostsAPI(currentPage); // <--- ИЗМЕНЕНИЕ
+        const data = await fetchPostsAPI(currentPage); 
         setPosts(data.posts);
         setTotalPages(Math.ceil(data.total_posts / POSTS_PER_PAGE));
       } catch (err) {
-        // console.error уже будет в apiService, здесь только устанавливаем ошибку для UI
         setError(err.message);
         setPosts([]);
         setTotalPages(0);
@@ -35,7 +34,6 @@ function PostList({ onPostSelect }) {
     loadPosts();
   }, [currentPage]);
 
-  // ... (handlePageChange, handleShowComments и return без изменений) ...
   const handlePageChange = (pageNumber) => {
     setCurrentPage(pageNumber);
   };
@@ -47,20 +45,25 @@ function PostList({ onPostSelect }) {
   };
 
   if (isLoading) {
-    return <p>Загрузка постов...</p>;
+    // Используем спиннер
+    return (
+      <div className="spinner-container">
+        <div className="spinner"></div>
+      </div>
+    );
   }
 
   if (error) {
     return <p>Ошибка загрузки постов: {error}</p>;
   }
   
-  // Для totalPostsFromState лучше использовать totalPages, если он уже есть
   const noPostsAvailable = posts.length === 0 && totalPages === 0 && !isLoading;
 
   if (noPostsAvailable) { 
     return <p>Постов пока нет.</p>;
   }
   
+  // ... (return с таблицей и пагинацией как был) ...
   return (
     <div className="post-list">
       <h2>Список постов</h2>

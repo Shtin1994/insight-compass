@@ -1,13 +1,12 @@
 // frontend/src/components/CommentList.jsx
 
+// ... (импорты как были) ...
 import React from 'react';
 import CommentItem from './CommentItem';
-import Pagination from './Pagination'; // <--- Импортируем Pagination
+import Pagination from './Pagination';
 
 function CommentList({ postId, comments, isLoading, error, currentPage, totalPages, onPageChange }) { 
-  // Принимаем props для пагинации
-
-  if (!postId && !isLoading) { // Если нет postId и не идет загрузка, не рендерим
+  if (!postId && !isLoading) { 
     return null; 
   }
 
@@ -15,12 +14,16 @@ function CommentList({ postId, comments, isLoading, error, currentPage, totalPag
     return (
       <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
         {postId && <h3>Комментарии к посту ID: {postId}</h3>}
-        <p>Загрузка комментариев...</p>
+        {/* Используем спиннер */}
+        <div className="spinner-container">
+          <div className="spinner"></div>
+        </div>
       </div>
     );
   }
 
   if (error) {
+    // ... (обработка ошибки как была) ...
     return (
       <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
         {postId && <h3>Комментарии к посту ID: {postId}</h3>}
@@ -30,6 +33,7 @@ function CommentList({ postId, comments, isLoading, error, currentPage, totalPag
   }
 
   if (!comments || comments.length === 0) {
+    // ... (обработка отсутствия комментариев как была) ...
     return (
       <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
         {postId && <h3>Комментарии к посту ID: {postId}</h3>}
@@ -38,6 +42,7 @@ function CommentList({ postId, comments, isLoading, error, currentPage, totalPag
     );
   }
 
+  // ... (return с таблицей комментариев и пагинацией как был) ...
   return (
     <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
       <h3>Комментарии к посту ID: {postId}</h3>
