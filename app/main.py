@@ -5,6 +5,8 @@ import logging
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware # Убедитесь, что импорт есть
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, asc
 from sqlalchemy.orm import selectinload 
@@ -18,30 +20,30 @@ from .celery_app import celery_instance
 from .core.config import settings
 from .schemas import ui_schemas
 
-# Основной логгер приложения
-logging.basicConfig(level=logging.INFO) # Общий уровень INFO
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Логгер для эндпоинтов
 endpoint_logger = logging.getLogger("api_endpoints") 
-endpoint_logger.setLevel(logging.INFO) # Устанавливаем уровень INFO для endpoint_logger
+endpoint_logger.setLevel(logging.INFO) 
 
-# Убедимся, что у логгера есть обработчик, чтобы он выводил сообщения
 if not endpoint_logger.handlers and not logging.getLogger().handlers:
-    # Если ни у endpoint_logger, ни у корневого логгера нет обработчиков, добавим свой.
-    # Это актуально, если logging.basicConfig не сработал должным образом или был переопределен.
-    # Обычно в Docker логи uvicorn уже настроены, и это может быть излишним,
-    # но для надежности оставим.
     _handler = logging.StreamHandler()
     _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     _handler.setFormatter(_formatter)
     endpoint_logger.addHandler(_handler)
 elif not endpoint_logger.handlers and endpoint_logger.parent and endpoint_logger.parent.handlers:
-    # Если у родительского логгера есть обработчики, наш их унаследует, если propagate=True (по умолчанию)
     pass
 
-
 app = FastAPI(title="Insight Compass API", version="0.1.0")
+
+# --- НАСТРОЙКА CORS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Разрешаем все источники для отладки
+    allow_credentials=True, 
+    allow_methods=["*"],    
+    allow_headers=["*"],    
+)
+# --- КОНЕЦ НАСТРОЙКИ CORS ---
 
 def get_comment_author_display_name(comment: Comment) -> str: 
     if hasattr(comment, 'author_signature') and comment.author_signature:
@@ -78,7 +80,7 @@ async def get_posts_for_ui(
         return ui_schemas.PaginatedPostsResponse(total_posts=total_posts, posts=posts_list)
     except Exception as e:
         endpoint_logger.error(f"Error in get_posts_for_ui: {e}", exc_info=True)
-        if hasattr(e, 'errors') and callable(e.errors): # Для ValidationError Pydantic
+        if hasattr(e, 'errors') and callable(e.errors):
              endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
         raise HTTPException(status_code=500, detail="Internal server error while fetching posts")
 
@@ -133,7 +135,6 @@ async def get_comments_for_post_ui(
              endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
         raise HTTPException(status_code=500, detail=f"Internal server error while fetching comments for post {post_id}")
 
-# ... (остальные эндпоинты POST и GET / без изменений) ...
 @app.post("/run-collection-task/", summary="Запустить задачу сбора данных из Telegram")
 async def run_collection_task_endpoint(background_tasks: BackgroundTasks):
     logger.info("Endpoint /run-collection-task/ called. Adding task to background.")
