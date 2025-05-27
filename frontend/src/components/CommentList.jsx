@@ -2,20 +2,19 @@
 
 import React from 'react';
 import CommentItem from './CommentItem';
+import Pagination from './Pagination'; // <--- Импортируем Pagination
 
-// mockComments больше не нужны, удаляем их
+function CommentList({ postId, comments, isLoading, error, currentPage, totalPages, onPageChange }) { 
+  // Принимаем props для пагинации
 
-function CommentList({ postId, comments, isLoading, error }) { 
-  // Принимаем comments, isLoading, error из props
-
-  if (!postId) { // Это условие может быть уже не нужно, т.к. App.jsx его контролирует
+  if (!postId && !isLoading) { // Если нет postId и не идет загрузка, не рендерим
     return null; 
   }
 
   if (isLoading) {
     return (
       <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
-        <h3>Комментарии к посту ID: {postId}</h3>
+        {postId && <h3>Комментарии к посту ID: {postId}</h3>}
         <p>Загрузка комментариев...</p>
       </div>
     );
@@ -24,16 +23,16 @@ function CommentList({ postId, comments, isLoading, error }) {
   if (error) {
     return (
       <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
-        <h3>Комментарии к посту ID: {postId}</h3>
+        {postId && <h3>Комментарии к посту ID: {postId}</h3>}
         <p>Ошибка загрузки комментариев: {error}</p>
       </div>
     );
   }
 
-  if (!comments || comments.length === 0) { // Проверяем comments из props
+  if (!comments || comments.length === 0) {
     return (
       <div className="comment-list" style={{ marginTop: '20px', borderTop: '1px solid #ccc', paddingTop: '10px' }}>
-        <h3>Комментарии к посту ID: {postId}</h3>
+        {postId && <h3>Комментарии к посту ID: {postId}</h3>}
         <p>Комментариев к этому посту пока нет.</p>
       </div>
     );
@@ -51,12 +50,16 @@ function CommentList({ postId, comments, isLoading, error }) {
           </tr>
         </thead>
         <tbody>
-          {comments.map((comment) => ( // Используем comments из props
+          {comments.map((comment) => (
             <CommentItem key={comment.id} comment={comment} />
           ))}
         </tbody>
       </table>
-      {/* Пагинация для комментариев будет добавлена позже, если потребуется */}
+      <Pagination
+        currentPage={currentPage}
+        totalPages={totalPages}
+        onPageChange={onPageChange}
+      />
     </div>
   );
 }
