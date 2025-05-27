@@ -4,8 +4,10 @@ import React, { useState, useEffect } from 'react';
 import './App.css';
 import PostList from './components/PostList';
 import CommentList from './components/CommentList';
-// Импортируем константы
-import { API_BASE_URL, COMMENTS_PER_PAGE } from './config'; // <--- ИЗМЕНЕНИЕ
+// Импортируем сервисную функцию (API_BASE_URL и COMMENTS_PER_PAGE из config уже не нужны здесь напрямую)
+import { fetchCommentsAPI } from './services/apiService'; // <--- ИЗМЕНЕНИЕ
+import { COMMENTS_PER_PAGE } from './config'; // COMMENTS_PER_PAGE все еще нужен для расчета totalCommentPages
+
 
 function App() {
   const [selectedPostId, setSelectedPostId] = useState(null);
@@ -15,24 +17,19 @@ function App() {
   const [currentCommentPage, setCurrentCommentPage] = useState(1);
   const [totalCommentPages, setTotalCommentPages] = useState(0);
 
-  const fetchComments = async (postId, page = 1) => {
+  // Функция для загрузки комментариев теперь использует сервис
+  const loadComments = async (postId, page = 1) => { // Переименовали для ясности
     if (!postId) return;
     setIsLoadingComments(true);
     setCommentsError(null);
     try {
-      const skip = (page - 1) * COMMENTS_PER_PAGE; // <--- Используем константу
-      // Используем API_BASE_URL
-      const response = await fetch(`${API_BASE_URL}/posts/${postId}/comments/?skip=${skip}&limit=${COMMENTS_PER_PAGE}`); 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || `Ошибка HTTP: ${response.status}`);
-      }
-      const data = await response.json();
+      // Используем сервисную функцию
+      const data = await fetchCommentsAPI(postId, page); // <--- ИЗМЕНЕНИЕ
       setComments(data.comments);
-      setTotalCommentPages(Math.ceil(data.total_comments / COMMENTS_PER_PAGE)); // <--- Используем константу
+      setTotalCommentPages(Math.ceil(data.total_comments / COMMENTS_PER_PAGE));
       setCurrentCommentPage(page);
     } catch (err) {
-      console.error(`Ошибка при загрузке комментариев для поста ${postId}, страница ${page}:`, err);
+      // console.error уже будет в apiService
       setCommentsError(err.message);
       setComments([]);
       setTotalCommentPages(0);
@@ -41,22 +38,27 @@ function App() {
     }
   };
 
-  // ... (handleShowComments, handleCommentPageChange и return без изменений) ...
   const handleShowComments = (postId) => {
     if (selectedPostId === postId) {
-      return; 
+      // При повторном клике на тот же пост, можно перезагрузить первую страницу
+      // или просто не делать ничего, если комментарии уже загружены
+      // Для простоты, если хотим чтобы ничего не происходило:
+      // if(comments.length > 0 && currentCommentPage === 1) return; 
+      // loadComments(postId, 1);
+      return; // Пока оставим так - ничего не делать при повторном клике на тот же самый
     } else {
       setSelectedPostId(postId);
-      fetchComments(postId, 1); 
+      loadComments(postId, 1); 
     }
   };
 
   const handleCommentPageChange = (pageNumber) => {
     if (selectedPostId) {
-      fetchComments(selectedPostId, pageNumber);
+      loadComments(selectedPostId, pageNumber);
     }
   };
 
+  // ... (return без изменений) ...
   return (
     <div className="App">
       <header className="App-header">

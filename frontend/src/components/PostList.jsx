@@ -3,8 +3,9 @@
 import React, { useState, useEffect } from 'react';
 import PostItem from './PostItem';
 import Pagination from './Pagination';
-// Импортируем константы
-import { API_BASE_URL, POSTS_PER_PAGE } from '../config'; // <--- ИЗМЕНЕНИЕ (путь к config.js)
+import { POSTS_PER_PAGE } from '../config'; // API_BASE_URL больше не нужен здесь напрямую
+// Импортируем сервисную функцию
+import { fetchPostsAPI } from '../services/apiService'; // <--- ИЗМЕНЕНИЕ
 
 function PostList({ onPostSelect }) { 
   const [posts, setPosts] = useState([]);
@@ -12,25 +13,18 @@ function PostList({ onPostSelect }) {
   const [error, setError] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
-  // const postsPerPage = POSTS_PER_PAGE; // <--- Используем константу (можно прямо в useEffect)
 
   useEffect(() => {
-    const fetchPosts = async () => {
+    const loadPosts = async () => { // Переименовали для ясности
       setIsLoading(true);
       setError(null);
       try {
-        const skip = (currentPage - 1) * POSTS_PER_PAGE; // <--- Используем константу
-        // Используем API_BASE_URL
-        const response = await fetch(`${API_BASE_URL}/posts/?skip=${skip}&limit=${POSTS_PER_PAGE}`);
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.detail || `Ошибка HTTP: ${response.status}`);
-        }
-        const data = await response.json();
+        // Используем сервисную функцию
+        const data = await fetchPostsAPI(currentPage); // <--- ИЗМЕНЕНИЕ
         setPosts(data.posts);
-        setTotalPages(Math.ceil(data.total_posts / POSTS_PER_PAGE)); // <--- Используем константу
+        setTotalPages(Math.ceil(data.total_posts / POSTS_PER_PAGE));
       } catch (err) {
-        console.error("Ошибка при загрузке постов:", err);
+        // console.error уже будет в apiService, здесь только устанавливаем ошибку для UI
         setError(err.message);
         setPosts([]);
         setTotalPages(0);
@@ -38,8 +32,8 @@ function PostList({ onPostSelect }) {
         setIsLoading(false);
       }
     };
-    fetchPosts();
-  }, [currentPage]); // <--- Убираем postsPerPage из зависимостей, т.к. он теперь константа
+    loadPosts();
+  }, [currentPage]);
 
   // ... (handlePageChange, handleShowComments и return без изменений) ...
   const handlePageChange = (pageNumber) => {
@@ -60,9 +54,10 @@ function PostList({ onPostSelect }) {
     return <p>Ошибка загрузки постов: {error}</p>;
   }
   
-  const totalPostsFromState = posts.length > 0 ? totalPages * POSTS_PER_PAGE : 0; // Приблизительно, лучше total_posts из API
+  // Для totalPostsFromState лучше использовать totalPages, если он уже есть
+  const noPostsAvailable = posts.length === 0 && totalPages === 0 && !isLoading;
 
-  if (posts.length === 0 && totalPostsFromState === 0 && !isLoading ) { 
+  if (noPostsAvailable) { 
     return <p>Постов пока нет.</p>;
   }
   
