@@ -1,6 +1,5 @@
 // frontend/src/components/PostList.jsx
 
-// ... (импорты как были) ...
 import React, { useState, useEffect } from 'react';
 import PostItem from './PostItem';
 import Pagination from './Pagination';
@@ -8,7 +7,6 @@ import { POSTS_PER_PAGE } from '../config';
 import { fetchPostsAPI } from '../services/apiService';
 
 function PostList({ onPostSelect }) { 
-  // ... (состояния как были) ...
   const [posts, setPosts] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -45,7 +43,6 @@ function PostList({ onPostSelect }) {
   };
 
   if (isLoading) {
-    // Используем спиннер
     return (
       <div className="spinner-container">
         <div className="spinner"></div>
@@ -63,7 +60,6 @@ function PostList({ onPostSelect }) {
     return <p>Постов пока нет.</p>;
   }
   
-  // ... (return с таблицей и пагинацией как был) ...
   return (
     <div className="post-list">
       <h2>Список постов</h2>
@@ -74,6 +70,7 @@ function PostList({ onPostSelect }) {
             <th>Текст поста (превью)</th>
             <th>Дата</th>
             <th>Комментарии</th>
+            <th>Тональность</th> {/* <--- НОВЫЙ ЗАГОЛОВОК */}
             <th>Действие</th>
           </tr>
         </thead>

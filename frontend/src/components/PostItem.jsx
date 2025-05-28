@@ -2,13 +2,30 @@
 
 import React from 'react';
 
-function PostItem({ post, onShowComments }) { // Принимаем объект post и функцию onShowComments
+// Простая функция для получения эмодзи по метке тональности
+const getSentimentEmoji = (label) => {
+  if (!label) return '❓'; // Если метки нет
+  switch (label.toLowerCase()) {
+    case 'positive':
+      return '😊';
+    case 'negative':
+      return '😠';
+    case 'neutral':
+      return '😐';
+    case 'mixed':
+      return '🤔';
+    default:
+      return '❓';
+  }
+};
+
+function PostItem({ post, onShowComments }) {
   if (!post) {
-    return null; // На случай, если post не передан
+    return null;
   }
 
   const handleShowCommentsClick = () => {
-    onShowComments(post.id); // Вызываем переданную функцию с ID поста
+    onShowComments(post.id);
   };
 
   return (
@@ -17,6 +34,9 @@ function PostItem({ post, onShowComments }) { // Принимаем объект
       <td>{post.post_text ? post.post_text.substring(0, 100) + '...' : '[Нет текста]'}</td>
       <td>{new Date(post.posted_at).toLocaleString()}</td>
       <td>{post.comments_count}</td>
+      <td> {/* <--- НОВАЯ ЯЧЕЙКА ДЛЯ ТОНАЛЬНОСТИ */}
+        {getSentimentEmoji(post.post_sentiment_label)} {post.post_sentiment_label ? post.post_sentiment_label.charAt(0).toUpperCase() + post.post_sentiment_label.slice(1) : 'N/A'}
+      </td>
       <td>
         <button onClick={handleShowCommentsClick}>
           Комментарии
