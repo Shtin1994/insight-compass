@@ -2,11 +2,11 @@
 
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any # Добавил Any для возможного использования в будущем, если понадобится
 
 class ChannelInfo(BaseModel):
     id: int
-    title: str  # Соответствует модели Channel.title
+    title: str 
     username: Optional[str] = None
 
     class Config:
@@ -15,11 +15,17 @@ class ChannelInfo(BaseModel):
 class PostListItem(BaseModel):
     id: int
     channel: ChannelInfo 
-    post_text: Optional[str] = None # Соответствует модели Post.post_text
-    posted_at: datetime            # Соответствует модели Post.posted_at
+    post_text: Optional[str] = None
+    posted_at: datetime 
     comments_count: int
-    link: str                      # Соответствует модели Post.link
+    link: str 
     summary_text: Optional[str] = None
+    
+    # --- НОВЫЕ ОПЦИОНАЛЬНЫЕ ПОЛЯ ДЛЯ ТОНАЛЬНОСТИ ПОСТА ---
+    post_sentiment_label: Optional[str] = None
+    post_sentiment_score: Optional[float] = None # float для оценки
+    # --- КОНЕЦ НОВЫХ ПОЛЕЙ ---
+
 
     class Config:
         from_attributes = True
@@ -30,9 +36,9 @@ class PaginatedPostsResponse(BaseModel):
 
 class CommentListItem(BaseModel):
     id: int
-    author_display_name: str # Формируется в main.py
-    text: str                # В это поле будет передаваться значение из Comment.content
-    commented_at: datetime   # Соответствует модели Comment.commented_at
+    author_display_name: str
+    text: str 
+    commented_at: datetime 
 
     class Config:
         from_attributes = True

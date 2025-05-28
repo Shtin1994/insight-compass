@@ -1,19 +1,18 @@
-# --- START OF FILE app/tasks.py (Corrected Initial Fetch Logic) ---
+# app/tasks.py
 
 import asyncio
-# ... (остальные импорты как в предыдущей версии) ...
 import os
 import time
 import traceback
 from datetime import timezone, datetime, timedelta
 
 import openai
-from openai import OpenAIError
+from openai import OpenAIError 
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.future import select
-from sqlalchemy import desc, func 
+from sqlalchemy.future import select 
+from sqlalchemy import desc, func, update # Добавлен update
 
 import telegram
 from telegram.constants import ParseMode
@@ -21,16 +20,14 @@ from telegram import helpers
 
 from telethon.errors import FloodWaitError
 from telethon.errors.rpcerrorlist import MsgIdInvalidError
-
-from telethon.tl.types import Message, User
+from telethon.tl.types import Message, User 
 from telethon import TelegramClient
 
 from app.celery_app import celery_instance
 from app.core.config import settings
-from app.models.telegram_data import Channel, Post, Comment
+from app.models.telegram_data import Channel, Post, Comment 
 
-
-# ... (тестовые задачи add, simple_debug_task без изменений) ...
+# --- Ваши существующие задачи ---
 @celery_instance.task(name="add")
 def add(x, y):
     print(f"Тестовый таск 'add': {x} + {y}")
@@ -45,9 +42,9 @@ def simple_debug_task(message: str):
     time.sleep(3)
     return f"Сообщение '{message}' обработано в simple_debug_task"
 
-
 @celery_instance.task(name="collect_telegram_data", bind=True, max_retries=3, default_retry_delay=60)
 def collect_telegram_data_task(self):
+    # ... (полный код вашей задачи collect_telegram_data_task, как вы его предоставили) ...
     task_start_time = time.time()
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (сбор постов и КОММЕНТАРИЕВ)...")
 
@@ -125,42 +122,30 @@ def collect_telegram_data_task(self):
                             iter_messages_params = {
                                 "entity": channel_entity,
                                 "limit": settings.POST_FETCH_LIMIT,
-                                # reverse=False по умолчанию (собирает самые новые первыми)
                             }
 
                             if current_channel_db_obj.last_processed_post_id and current_channel_db_obj.last_processed_post_id > 0:
-                                # Последующий сбор: используем min_id для получения только более новых постов
                                 iter_messages_params["min_id"] = current_channel_db_obj.last_processed_post_id
                                 print(f"  Последующий сбор: используем min_id={current_channel_db_obj.last_processed_post_id}.")
                             elif is_first_fetch_for_channel and settings.INITIAL_POST_FETCH_START_DATETIME:
-                                # Первый сбор с указанной начальной датой: используем offset_date и reverse=True
                                 iter_messages_params["offset_date"] = settings.INITIAL_POST_FETCH_START_DATETIME
-                                iter_messages_params["reverse"] = True # Начинаем со старых от этой даты
+                                iter_messages_params["reverse"] = True 
                                 print(f"  Первый сбор (с датой): начинаем с offset_date={settings.INITIAL_POST_FETCH_START_DATETIME}, reverse=True.")
                             else:
-                                # Первый сбор без указанной начальной даты (или last_processed_post_id нет):
-                                # Просто собираем последние N постов (limit уже установлен)
                                 print(f"  Первый сбор (без даты): собираем последние {settings.POST_FETCH_LIMIT} постов.")
-                                # reverse=False уже по умолчанию, limit уже установлен
 
                             latest_post_id_seen_this_run = current_channel_db_obj.last_processed_post_id or 0
                             total_collected_for_channel_this_run = 0
                             temp_posts_buffer_for_db_add: list[Post] = []
 
                             async for message_tg in tg_client.iter_messages(**iter_messages_params):
-                                # ... (остальная логика обработки message_tg и добавления в БД без изменений) ...
                                 message_tg: Message
                                 if not (message_tg.text or message_tg.media): continue
                                 
                                 if message_tg.id > latest_post_id_seen_this_run:
                                     latest_post_id_seen_this_run = message_tg.id
                                 elif not (is_first_fetch_for_channel and settings.INITIAL_POST_FETCH_START_DATETIME and iter_messages_params.get("reverse")):
-                                    # Если это не первый сбор с offset_date и reverse=True, то старые посты не нужны
-                                    # При reverse=True and offset_date, мы можем получать посты старше, чем latest_post_id_seen_this_run,
-                                    # но они все равно новее или равны offset_date, поэтому их нужно обработать.
-                                    # Проверка на существующий пост ниже это отловит.
                                     pass
-
 
                                 stmt_post_check = select(Post.id).where(Post.telegram_post_id == message_tg.id, Post.channel_id == current_channel_db_obj.id)
                                 result_post_check = await db_session.execute(stmt_post_check)
@@ -193,7 +178,6 @@ def collect_telegram_data_task(self):
                             elif total_collected_for_channel_this_run == 0:
                                 print(f"    Новых постов для канала '{current_channel_db_obj.title}' не найдено.")
                         
-                        # ... (код сбора комментариев остается без изменений) ...
                         if newly_added_post_objects_in_session:
                             print(f"  Начинаем сбор комментариев для {len(newly_added_post_objects_in_session)} новых постов...")
                             await db_session.flush()
@@ -245,7 +229,7 @@ def collect_telegram_data_task(self):
                                             telegram_user_id=user_tg_id,
                                             user_username=user_username_val,
                                             user_fullname=user_fullname_val,
-                                            text_content=comment_msg_tg.text,
+                                            text_content=comment_msg_tg.text, # Убедимся, что это поле из вашей модели Comment
                                             commented_at=comment_msg_tg.date.replace(tzinfo=timezone.utc) if comment_msg_tg.date else datetime.now(timezone.utc)
                                         )
                                         db_session.add(new_comment_db_obj)
@@ -267,7 +251,7 @@ def collect_telegram_data_task(self):
                         else:
                             print(f"  Нет новых постов для сбора комментариев для канала '{current_channel_db_obj.title if current_channel_db_obj else channel_identifier}'.")
 
-                    except FloodWaitError as fwe_channel: # ... (остальная обработка ошибок для канала и finally без изменений) ...
+                    except FloodWaitError as fwe_channel:
                         print(f"  !!! FloodWaitError для канала {channel_identifier}: ждем {fwe_channel.seconds} секунд. Попробуем позже.")
                         await asyncio.sleep(fwe_channel.seconds + 5)
                     except ValueError as ve_channel: 
@@ -280,7 +264,7 @@ def collect_telegram_data_task(self):
                 print("\nВсе изменения (каналы, посты, комментарии) сохранены в БД.")
             return "Сбор данных (с постами и комментариями) завершен."
 
-        except ConnectionRefusedError as e_auth: # ... (обработка ошибок и finally без изменений) ...
+        except ConnectionRefusedError as e_auth:
             raise e_auth from e_auth 
         except Exception as e_async_logic:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_collector: {type(e_async_logic).__name__} {e_async_logic}")
@@ -294,7 +278,7 @@ def collect_telegram_data_task(self):
                 print("Закрытие пула соединений БД (local_async_engine) из _async_main_logic_collector (finally)...")
                 await local_async_engine.dispose()
     
-    try: # ... (запуск _async_main_logic_collector и обработка ошибок без изменений) ...
+    try:
         result_message = asyncio.run(_async_main_logic_collector())
         task_duration = time.time() - task_start_time
         print(f"Celery таск '{self.name}' (ID: {self.request.id}) успешно завершен за {task_duration:.2f} сек. Результат: {result_message}")
@@ -318,13 +302,10 @@ def collect_telegram_data_task(self):
         except Exception as e_retry_logic:
              print(f"Ошибка в логике retry: {e_retry_logic}")
              raise e_task_level from e_task_level
-# --- Конец задачи сбора данных ---
 
-
-# --- Задача AI Суммаризации (без изменений) ---
 @celery_instance.task(name="summarize_top_posts", bind=True, max_retries=2, default_retry_delay=300)
 def summarize_top_posts_task(self, hours_ago=48, top_n=3):
-    # ... (код этой задачи остается БЕЗ ИЗМЕНЕНИЙ) ...
+    # ... (полный код вашей задачи summarize_top_posts_task, как вы его предоставили) ...
     task_start_time = time.time()
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (AI Суммаризация топ-{top_n} постов за {hours_ago}ч)...")
 
@@ -348,7 +329,7 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
 
     ASYNC_DB_URL_FOR_TASK = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-    async def _async_main_logic_summarizer(): # ... (остальной код этой вложенной функции без изменений) ...
+    async def _async_main_logic_summarizer():
         local_async_engine = None
         processed_posts_count = 0
         
@@ -378,7 +359,7 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
 
                 print(f"  Найдено {len(posts_to_process)} постов для суммаризации.")
 
-                for post_obj in posts_to_process: # ... (остальной код цикла суммаризации без изменений) ...
+                for post_obj in posts_to_process:
                     post_obj: Post
                     if not post_obj.text_content or len(post_obj.text_content.strip()) < 50 : 
                         print(f"    Пост ID {post_obj.id} (TG ID: {post_obj.telegram_post_id}) слишком короткий или без текста, пропускаем суммаризацию.")
@@ -421,7 +402,7 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
                         else:
                             print(f"      OpenAI вернул пустое резюме для поста ID {post_obj.id}.")
 
-                    except OpenAIError as e_openai: # ... (обработка ошибок OpenAI без изменений) ...
+                    except OpenAIError as e_openai:
                         print(f"    !!! Ошибка OpenAI API при суммаризации поста ID {post_obj.id}: {type(e_openai).__name__} - {e_openai}")
                         continue 
                     except Exception as e_summary:
@@ -437,7 +418,7 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
 
             return f"Суммаризация завершена. Обработано: {processed_posts_count} постов."
 
-        except Exception as e_async_summarizer: # ... (обработка ошибок и finally без изменений) ...
+        except Exception as e_async_summarizer:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_summarizer: {type(e_async_summarizer).__name__} {e_async_summarizer}")
             traceback.print_exc()
             raise
@@ -446,7 +427,7 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
                 print("Закрытие пула соединений БД (local_async_engine) из _async_main_logic_summarizer (finally)...")
                 await local_async_engine.dispose()
 
-    try: # ... (запуск _async_main_logic_summarizer и обработка ошибок без изменений) ...
+    try:
         result_message = asyncio.run(_async_main_logic_summarizer())
         task_duration = time.time() - task_start_time
         print(f"Celery таск '{self.name}' (ID: {self.request.id}) успешно завершен за {task_duration:.2f} сек. Результат: {result_message}")
@@ -465,13 +446,10 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
         except Exception as e_retry_logic_summarizer:
              print(f"Ошибка в логике retry (summarizer): {e_retry_logic_summarizer}")
              raise e_task_level_summarizer from e_task_level_summarizer
-# --- Конец задачи AI Суммаризации ---
 
-
-# --- ЗАДАЧА: Отправка ежедневного дайджеста (с улучшенной логикой выбора постов) ---
 @celery_instance.task(name="send_daily_digest", bind=True, max_retries=3, default_retry_delay=180)
 def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
-    # ... (код этой задачи остается БЕЗ ИЗМЕНЕНИЙ по сравнению с предыдущей версией, где мы добавили .where(Post.comments_count > 0) и .where(Post.summary_text != None)) ...
+    # ... (полный код вашей задачи send_daily_digest_task, как вы его предоставили) ...
     task_start_time = time.time()
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Отправка ежедневного дайджеста)...")
 
@@ -506,14 +484,11 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                 new_posts_count = result_new_posts_count.scalar_one_or_none() or 0
 
                 header_part = helpers.escape_markdown(f" digest for *Insight-Compass* за последние {hours_ago_posts} часа:\n", version=2)
-                print(f"DEBUG: header_part = '{header_part}'")
                 message_parts.append(header_part)
 
                 new_posts_summary_part = helpers.escape_markdown(f"📰 Всего новых постов: *{new_posts_count}*\n", version=2)
-                print(f"DEBUG: new_posts_summary_part = '{new_posts_summary_part}'")
                 message_parts.append(new_posts_summary_part)
-
-                # ОБНОВЛЕННЫЙ ЗАПРОС ДЛЯ ТОП-ПОСТОВ
+                
                 stmt_top_posts = (
                     select(Post.link, Post.comments_count, Post.summary_text, Channel.title.label("channel_title"))
                     .join(Channel, Post.channel_id == Channel.id)
@@ -528,45 +503,35 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
 
                 if top_posts_data:
                     top_posts_header_part = helpers.escape_markdown(f"\n🔥 Топ-{len(top_posts_data)} обсуждаемых постов с AI-резюме:\n", version=2)
-                    print(f"DEBUG: top_posts_header_part = '{top_posts_header_part}'")
                     message_parts.append(top_posts_header_part)
                     
                     for i, post_data in enumerate(top_posts_data):
                         link_url = post_data.link 
                         link_text = "Пост" 
-
                         comments = post_data.comments_count 
                         summary_text_original = post_data.summary_text 
                         summary_escaped = helpers.escape_markdown(summary_text_original, version=2)
-                        
                         channel_title_original = post_data.channel_title or "Неизвестный канал"
                         channel_title_escaped = helpers.escape_markdown(channel_title_original, version=2)
-                        
                         item_number_str = helpers.escape_markdown(str(i+1), version=2) + "\\."
-
                         post_digest_part_str = (
                             f"\n*{item_number_str}* {channel_title_escaped} [{link_text}]({link_url})\n"
                             f"   💬 Комментариев: {comments}\n"
                             f"   📝 Резюме: _{summary_escaped}_\n"
                         )
-                        print(f"DEBUG: post_digest_part_str (для поста с link {link_url}) = '{post_digest_part_str}'")
                         message_parts.append(post_digest_part_str)
                 else:
                     no_top_posts_part = helpers.escape_markdown("\n🔥 Нет активно обсуждаемых постов с готовыми резюме за указанный период.\nПопробуйте сначала запустить AI-суммаризацию или дождитесь следующего цикла.\n", version=2)
-                    print(f"DEBUG: no_top_posts_part = '{no_top_posts_part}'")
                     message_parts.append(no_top_posts_part)
 
             digest_message_final = "".join(message_parts)
             
-            print(f"  Финальное сообщение для Telegram (перед отправкой):\n---\n{digest_message_final}\n---")
-
             await bot.send_message(
                 chat_id=settings.TELEGRAM_TARGET_CHAT_ID,
                 text=digest_message_final,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 disable_web_page_preview=True
             )
-            print(f"  Ежедневный дайджест успешно отправлен в чат ID: {settings.TELEGRAM_TARGET_CHAT_ID}")
             result_status_internal = f"Дайджест успешно отправлен. Постов: {new_posts_count}, Топ: {len(top_posts_data)}."
 
         except telegram.error.TelegramError as e_tg_bot_internal:
@@ -583,7 +548,6 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
             raise e_digest_internal
         finally:
             if local_async_engine_digest:
-                print("Закрытие пула соединений БД (local_async_engine_digest) из _async_send_digest_logic (finally)...")
                 await local_async_engine_digest.dispose()
         
         return result_status_internal
@@ -607,6 +571,94 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
         except Exception as e_retry_logic_digest:
              print(f"Ошибка в логике retry (digest): {e_retry_logic_digest}")
              raise e_task_level_digest from e_task_level_digest
-# --- Конец задачи отправки дайджеста ---
 
-# --- END OF FILE app/tasks.py (Updated Digest Logic) ---
+# --- НОВАЯ ЗАДАЧА: Анализ тональности постов ---
+@celery_instance.task(name="analyze_posts_sentiment", bind=True, max_retries=2, default_retry_delay=300)
+def analyze_posts_sentiment_task(self, limit_posts_to_analyze=10):
+    task_start_time = time.time()
+    print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Анализ тональности постов, лимит: {limit_posts_to_analyze})...")
+
+    if not settings.OPENAI_API_KEY: 
+        error_msg = "Ошибка: OPENAI_API_KEY не настроен для анализа тональности."
+        print(error_msg)
+        return error_msg 
+
+    ASYNC_DB_URL_FOR_TASK = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+
+    async def _async_main_logic_sentiment_analyzer():
+        local_async_engine = None
+        analyzed_posts_count = 0
+        
+        try:
+            local_async_engine = create_async_engine(ASYNC_DB_URL_FOR_TASK, echo=False, pool_pre_ping=True)
+            LocalAsyncSessionFactory = sessionmaker(
+                bind=local_async_engine, class_=AsyncSession, expire_on_commit=False
+            )
+
+            async with LocalAsyncSessionFactory() as db_session:
+                stmt_posts_to_analyze = (
+                    select(Post)
+                    .where(Post.text_content != None) # Используем text_content для проверки наличия текста поста
+                    .where(Post.post_sentiment_label == None) 
+                    .order_by(Post.posted_at.asc()) 
+                    .limit(limit_posts_to_analyze)
+                )
+                
+                result_posts = await db_session.execute(stmt_posts_to_analyze)
+                posts_to_process = result_posts.scalars().all()
+
+                if not posts_to_process:
+                    print(f"  Не найдено постов для анализа тональности (с текстом и без sentiment_label).")
+                    return "Нет постов для анализа тональности."
+
+                print(f"  Найдено {len(posts_to_process)} постов для анализа тональности.")
+
+                for post_obj in posts_to_process:
+                    post_obj: Post
+                    print(f"    Обработка поста ID {post_obj.id} (TG ID: {post_obj.telegram_post_id}) для анализа тональности...")
+                    
+                    mock_sentiment_label = "neutral" 
+                    mock_sentiment_score = 0.0       
+                    await asyncio.sleep(0.1) 
+                    
+                    post_obj.post_sentiment_label = mock_sentiment_label
+                    post_obj.post_sentiment_score = mock_sentiment_score
+                    post_obj.updated_at = datetime.now(timezone.utc)
+                    db_session.add(post_obj) 
+
+                    analyzed_posts_count += 1
+                    print(f"      Тональность для поста ID {post_obj.id} установлена (mock): {mock_sentiment_label} ({mock_sentiment_score})")
+                
+                if analyzed_posts_count > 0:
+                    await db_session.commit()
+                    print(f"  Успешно проанализирована тональность (mock) и сохранено {analyzed_posts_count} постов.")
+                else:
+                    print(f"  Не было проанализировано ни одного поста в этом запуске.")
+
+            return f"Анализ тональности (mock) завершен. Обработано: {analyzed_posts_count} постов."
+
+        except Exception as e_async_analyzer:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_sentiment_analyzer: {type(e_async_analyzer).__name__} {e_async_analyzer}")
+            traceback.print_exc()
+            raise
+        finally:
+            if local_async_engine:
+                await local_async_engine.dispose()
+
+    try:
+        result_message = asyncio.run(_async_main_logic_sentiment_analyzer())
+        task_duration = time.time() - task_start_time
+        print(f"Celery таск '{self.name}' (ID: {self.request.id}) успешно завершен за {task_duration:.2f} сек. Результат: {result_message}")
+        return result_message
+    except Exception as e_task_level_analyzer:
+        task_duration = time.time() - task_start_time
+        final_error_message = f"!!! КРИТИЧЕСКАЯ ОШИБКА в Celery таске '{self.name}' (ID: {self.request.id}) (за {task_duration:.2f} сек): {type(e_task_level_analyzer).__name__} {e_task_level_analyzer}"
+        print(final_error_message)
+        traceback.print_exc()
+        try:
+            raise self.retry(exc=e_task_level_analyzer)
+        except self.MaxRetriesExceededError:
+            raise e_task_level_analyzer from e_task_level_analyzer
+        except Exception as e_retry_logic_analyzer:
+             raise e_task_level_analyzer from e_retry_logic_analyzer
+# --- Конец задачи анализа тональности ---
