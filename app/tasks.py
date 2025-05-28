@@ -1,9 +1,8 @@
-# app/tasks.py
-
 import asyncio
 import os
 import time
 import traceback
+import json 
 from datetime import timezone, datetime, timedelta
 
 import openai
@@ -12,7 +11,7 @@ from openai import OpenAIError
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select 
-from sqlalchemy import desc, func, update # Добавлен update
+from sqlalchemy import desc, func, update 
 
 import telegram
 from telegram.constants import ParseMode
@@ -449,16 +448,11 @@ def summarize_top_posts_task(self, hours_ago=48, top_n=3):
 
 @celery_instance.task(name="send_daily_digest", bind=True, max_retries=3, default_retry_delay=180)
 def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
-    # ... (полный код вашей задачи send_daily_digest_task, как вы его предоставили) ...
     task_start_time = time.time()
-    print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Отправка ежедневного дайджеста)...")
+    print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Отправка ежедневного дайджеста с тональностью)...")
 
-    if not settings.TELEGRAM_BOT_TOKEN:
-        error_msg = "Ошибка: TELEGRAM_BOT_TOKEN не настроен в .env файле для отправки дайджеста."
-        print(error_msg)
-        return error_msg
-    if not settings.TELEGRAM_TARGET_CHAT_ID:
-        error_msg = "Ошибка: TELEGRAM_TARGET_CHAT_ID не настроен в .env файле для отправки дайджеста."
+    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_TARGET_CHAT_ID:
+        error_msg = "Ошибка: TELEGRAM_BOT_TOKEN или TELEGRAM_TARGET_CHAT_ID не настроены."
         print(error_msg)
         return error_msg
 
@@ -483,18 +477,24 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                 result_new_posts_count = await db_session.execute(stmt_new_posts_count)
                 new_posts_count = result_new_posts_count.scalar_one_or_none() or 0
 
-                header_part = helpers.escape_markdown(f" digest for *Insight-Compass* за последние {hours_ago_posts} часа:\n", version=2)
-                message_parts.append(header_part)
+                message_parts.append(helpers.escape_markdown(f" digest for *Insight-Compass* за последние {hours_ago_posts} часа:\n", version=2))
+                message_parts.append(helpers.escape_markdown(f"📰 Всего новых постов: *{new_posts_count}*\n", version=2))
 
-                new_posts_summary_part = helpers.escape_markdown(f"📰 Всего новых постов: *{new_posts_count}*\n", version=2)
-                message_parts.append(new_posts_summary_part)
-                
+                # ОБНОВЛЕННЫЙ ЗАПРОС ДЛЯ ТОП-ПОСТОВ: Добавляем post_sentiment_label
                 stmt_top_posts = (
-                    select(Post.link, Post.comments_count, Post.summary_text, Channel.title.label("channel_title"))
+                    select(
+                        Post.link, 
+                        Post.comments_count, 
+                        Post.summary_text, 
+                        Post.post_sentiment_label, # <--- НОВОЕ ПОЛЕ
+                        # Post.post_sentiment_score, # <--- Можно добавить и score, если нужно
+                        Channel.title.label("channel_title")
+                    )
                     .join(Channel, Post.channel_id == Channel.id)
                     .where(Post.posted_at >= time_threshold_posts)
                     .where(Post.comments_count > 0)         
                     .where(Post.summary_text != None)       
+                    # Можно добавить .where(Post.post_sentiment_label != None), если хотим только посты с уже проанализированной тональностью
                     .order_by(desc(Post.comments_count))
                     .limit(top_n_summarized)
                 )
@@ -502,44 +502,57 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
                 top_posts_data = result_top_posts.all()
 
                 if top_posts_data:
-                    top_posts_header_part = helpers.escape_markdown(f"\n🔥 Топ-{len(top_posts_data)} обсуждаемых постов с AI-резюме:\n", version=2)
-                    message_parts.append(top_posts_header_part)
+                    message_parts.append(helpers.escape_markdown(f"\n🔥 Топ-{len(top_posts_data)} обсуждаемых постов с AI-резюме и тональностью:\n", version=2))
                     
                     for i, post_data in enumerate(top_posts_data):
-                        link_url = post_data.link 
+                        link_md = helpers.escape_markdown(post_data.link, version=2) # Экранируем URL
                         link_text = "Пост" 
-                        comments = post_data.comments_count 
-                        summary_text_original = post_data.summary_text 
-                        summary_escaped = helpers.escape_markdown(summary_text_original, version=2)
-                        channel_title_original = post_data.channel_title or "Неизвестный канал"
-                        channel_title_escaped = helpers.escape_markdown(channel_title_original, version=2)
-                        item_number_str = helpers.escape_markdown(str(i+1), version=2) + "\\."
+
+                        comments_md = helpers.escape_markdown(str(post_data.comments_count), version=2)
+                        summary_md = helpers.escape_markdown(post_data.summary_text or "Резюме отсутствует.", version=2)
+                        channel_title_md = helpers.escape_markdown(post_data.channel_title or "Неизвестный канал", version=2)
+                        item_number_md = helpers.escape_markdown(str(i+1), version=2) + "\\."
+                        
+                        # Формируем строку тональности
+                        sentiment_str = ""
+                        if post_data.post_sentiment_label:
+                            label = post_data.post_sentiment_label
+                            # Можно добавить эмодзи или более описательные метки
+                            emoji = ""
+                            if label == "positive": emoji = "😊 "
+                            elif label == "negative": emoji = "😠 "
+                            elif label == "neutral": emoji = "😐 "
+                            elif label == "mixed": emoji = "🤔 "
+                            sentiment_str = helpers.escape_markdown(f"   {emoji}Тональность: {label.capitalize()}\n", version=2)
+
                         post_digest_part_str = (
-                            f"\n*{item_number_str}* {channel_title_escaped} [{link_text}]({link_url})\n"
-                            f"   💬 Комментариев: {comments}\n"
-                            f"   📝 Резюме: _{summary_escaped}_\n"
+                            f"\n*{item_number_md}* {channel_title_md} [{link_text}]({link_md})\n"
+                            f"   💬 Комментариев: {comments_md}\n"
+                            f"{sentiment_str}" # <--- ДОБАВЛЕНА СТРОКА С ТОНАЛЬНОСТЬЮ
+                            f"   📝 Резюме: _{summary_md}_\n"
                         )
                         message_parts.append(post_digest_part_str)
                 else:
-                    no_top_posts_part = helpers.escape_markdown("\n🔥 Нет активно обсуждаемых постов с готовыми резюме за указанный период.\nПопробуйте сначала запустить AI-суммаризацию или дождитесь следующего цикла.\n", version=2)
-                    message_parts.append(no_top_posts_part)
+                    message_parts.append(helpers.escape_markdown("\n🔥 Нет активно обсуждаемых постов с готовыми резюме за указанный период.\n", version=2))
 
             digest_message_final = "".join(message_parts)
             
+            print(f"  Финальное сообщение дайджеста для Telegram (с тональностью):\n---\n{digest_message_final}\n---")
+
             await bot.send_message(
                 chat_id=settings.TELEGRAM_TARGET_CHAT_ID,
                 text=digest_message_final,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 disable_web_page_preview=True
             )
-            result_status_internal = f"Дайджест успешно отправлен. Постов: {new_posts_count}, Топ: {len(top_posts_data)}."
+            result_status_internal = f"Дайджест (с тональностью) успешно отправлен. Постов: {new_posts_count}, Топ: {len(top_posts_data)}."
 
+        # ... (except и finally блоки без изменений) ...
         except telegram.error.TelegramError as e_tg_bot_internal:
             error_msg_internal = f"!!! Ошибка Telegram Bot API при отправке дайджеста: {type(e_tg_bot_internal).__name__} - {e_tg_bot_internal}"
             print(error_msg_internal)
             result_status_internal = error_msg_internal
             raise e_tg_bot_internal 
-            
         except Exception as e_digest_internal:
             error_msg_internal = f"!!! Неожиданная ошибка при формировании/отправке дайджеста: {type(e_digest_internal).__name__} - {e_digest_internal}"
             print(error_msg_internal)
@@ -549,9 +562,8 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
         finally:
             if local_async_engine_digest:
                 await local_async_engine_digest.dispose()
-        
         return result_status_internal
-
+    # ... (try/except для запуска _async_send_digest_logic и retry без изменений) ...
     try:
         result_message = asyncio.run(_async_send_digest_logic())
         task_duration = time.time() - task_start_time
@@ -563,18 +575,15 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_summarized=3):
         print(final_error_message)
         traceback.print_exc()
         try:
-            print(f"Попытка retry для таска {self.request.id} (digest) из-за {type(e_task_level_digest).__name__}")
-            raise self.retry(exc=e_task_level_digest, countdown=int(self.default_retry_delay * (self.request.retries + 1)))
+            raise self.retry(exc=e_task_level_digest)
         except self.MaxRetriesExceededError:
-            print(f"Достигнуто максимальное количество попыток для таска {self.request.id} (digest). Ошибка: {e_task_level_digest}")
             raise e_task_level_digest from e_task_level_digest
         except Exception as e_retry_logic_digest:
-             print(f"Ошибка в логике retry (digest): {e_retry_logic_digest}")
              raise e_task_level_digest from e_task_level_digest
-
-# --- НОВАЯ ЗАДАЧА: Анализ тональности постов ---
+# --- Конец задачи отправки дайджеста ---
+# --- ЗАДАЧА: Анализ тональности постов (ОБНОВЛЕННАЯ С LLM) ---
 @celery_instance.task(name="analyze_posts_sentiment", bind=True, max_retries=2, default_retry_delay=300)
-def analyze_posts_sentiment_task(self, limit_posts_to_analyze=10):
+def analyze_posts_sentiment_task(self, limit_posts_to_analyze=5): # Уменьшим лимит для тестов с LLM
     task_start_time = time.time()
     print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Анализ тональности постов, лимит: {limit_posts_to_analyze})...")
 
@@ -582,6 +591,17 @@ def analyze_posts_sentiment_task(self, limit_posts_to_analyze=10):
         error_msg = "Ошибка: OPENAI_API_KEY не настроен для анализа тональности."
         print(error_msg)
         return error_msg 
+
+    try:
+        openai_client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+    except Exception as e_openai_init:
+        error_msg = f"Ошибка инициализации OpenAI клиента: {e_openai_init}"
+        print(error_msg)
+        try:
+            raise self.retry(exc=e_openai_init)
+        except self.MaxRetriesExceededError: return error_msg
+        except Exception as e_retry_init: return f"Ошибка в логике retry OpenAI init: {e_retry_init}"
+
 
     ASYNC_DB_URL_FOR_TASK = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
@@ -598,7 +618,8 @@ def analyze_posts_sentiment_task(self, limit_posts_to_analyze=10):
             async with LocalAsyncSessionFactory() as db_session:
                 stmt_posts_to_analyze = (
                     select(Post)
-                    .where(Post.text_content != None) # Используем text_content для проверки наличия текста поста
+                    .where(Post.text_content != None) # Используем text_content из вашей модели Post
+                    .where(Post.text_content != '')   # Добавим проверку на непустой текст
                     .where(Post.post_sentiment_label == None) 
                     .order_by(Post.posted_at.asc()) 
                     .limit(limit_posts_to_analyze)
@@ -615,28 +636,101 @@ def analyze_posts_sentiment_task(self, limit_posts_to_analyze=10):
 
                 for post_obj in posts_to_process:
                     post_obj: Post
-                    print(f"    Обработка поста ID {post_obj.id} (TG ID: {post_obj.telegram_post_id}) для анализа тональности...")
+                    # Убедимся, что text_content не None перед использованием
+                    if not post_obj.text_content:
+                        print(f"    Пост ID {post_obj.id} (TG ID: {post_obj.telegram_post_id}) не имеет text_content, пропускаем.")
+                        continue
+                        
+                    print(f"    Анализ тональности поста ID {post_obj.id} (TG ID: {post_obj.telegram_post_id})...")
                     
-                    mock_sentiment_label = "neutral" 
-                    mock_sentiment_score = 0.0       
-                    await asyncio.sleep(0.1) 
-                    
-                    post_obj.post_sentiment_label = mock_sentiment_label
-                    post_obj.post_sentiment_score = mock_sentiment_score
+                    sentiment_label_to_save = "neutral" # Значения по умолчанию
+                    sentiment_score_to_save = 0.0
+
+                    try:
+                        sentiment_prompt = f"""
+Тебе будет предоставлен текст поста из Telegram-канала. Твоя задача - определить эмоциональную тональность этого текста.
+
+Верни ответ в формате JSON со следующими ключами:
+- "sentiment_label": строка, одно из значений ["positive", "negative", "neutral", "mixed"]. "mixed" используется, если в тексте присутствуют как явно позитивные, так и явно негативные эмоции одновременно.
+- "sentiment_score": число с плавающей точкой от -1.0 до 1.0, где -1.0 - крайне негативная тональность, 1.0 - крайне позитивная, 0.0 - нейтральная. Для "mixed" можно использовать значение около 0.
+
+Если текст слишком короткий, бессмысленный, или состоит только из эмодзи/ссылок, и тональность определить невозможно, верни "sentiment_label": "neutral" и "sentiment_score": 0.0.
+
+Текст поста:
+---
+{post_obj.text_content[:3500]} 
+---
+
+JSON_RESPONSE:
+"""
+                        # Используем to_thread для асинхронного выполнения синхронного вызова OpenAI
+                        completion = await asyncio.to_thread(
+                            openai_client.chat.completions.create,
+                            model="gpt-3.5-turbo", # Или другая модель, если предпочитаете
+                            messages=[
+                                {"role": "system", "content": "Ты AI-ассистент, анализирующий тональность текста и возвращающий результат в JSON."},
+                                {"role": "user", "content": sentiment_prompt}
+                            ],
+                            temperature=0.2,
+                            max_tokens=50, # Для JSON ответа много не нужно
+                            response_format={"type": "json_object"} # Просим JSON ответ (для совместимых моделей)
+                        )
+                        
+                        raw_response_content = completion.choices[0].message.content
+                        print(f"      Raw LLM response for post ID {post_obj.id}: {raw_response_content}")
+                        
+                        if raw_response_content:
+                            try:
+                                sentiment_data = json.loads(raw_response_content)
+                                sentiment_label_to_save = sentiment_data.get("sentiment_label", "neutral")
+                                sentiment_score_to_save = float(sentiment_data.get("sentiment_score", 0.0))
+
+                                # Валидация полученных значений
+                                valid_labels = ["positive", "negative", "neutral", "mixed"]
+                                if sentiment_label_to_save not in valid_labels:
+                                    print(f"      ПРЕДУПРЕЖДЕНИЕ: LLM вернул невалидный sentiment_label '{sentiment_label_to_save}'. Установлен 'neutral'.")
+                                    sentiment_label_to_save = "neutral"
+                                
+                                if not (-1.0 <= sentiment_score_to_save <= 1.0):
+                                    print(f"      ПРЕДУПРЕЖДЕНИЕ: LLM вернул sentiment_score вне диапазона: {sentiment_score_to_save}. Установлен 0.0.")
+                                    sentiment_score_to_save = 0.0
+
+                            except json.JSONDecodeError:
+                                print(f"      ОШИБКА: Не удалось распарсить JSON от LLM: {raw_response_content}")
+                                # Оставляем значения по умолчанию (neutral, 0.0)
+                            except (TypeError, ValueError) as e_val:
+                                print(f"      ОШИБКА: Неверный тип данных в JSON от LLM ({e_val}): {raw_response_content}")
+                                # Оставляем значения по умолчанию
+                        else:
+                            print(f"      OpenAI вернул пустой ответ для поста ID {post_obj.id}.")
+
+                    except OpenAIError as e_openai:
+                        print(f"    !!! Ошибка OpenAI API при анализе тональности поста ID {post_obj.id}: {type(e_openai).__name__} - {e_openai}")
+                        # В случае ошибки OpenAI, оставляем sentiment поля как NULL или ставим neutral/0.0 и продолжаем
+                        # Здесь мы не обновляем, поля останутся NULL, и задача попробует снова в след. раз
+                        continue 
+                    except Exception as e_sentiment_analysis:
+                        print(f"    !!! Неожиданная ошибка при анализе тональности поста ID {post_obj.id}: {type(e_sentiment_analysis).__name__} - {e_sentiment_analysis}")
+                        traceback.print_exc(limit=2)
+                        continue # Пропускаем этот пост
+
+                    # Обновляем пост в БД
+                    post_obj.post_sentiment_label = sentiment_label_to_save
+                    post_obj.post_sentiment_score = sentiment_score_to_save
                     post_obj.updated_at = datetime.now(timezone.utc)
                     db_session.add(post_obj) 
 
                     analyzed_posts_count += 1
-                    print(f"      Тональность для поста ID {post_obj.id} установлена (mock): {mock_sentiment_label} ({mock_sentiment_score})")
+                    print(f"      Тональность для поста ID {post_obj.id} установлена: {sentiment_label_to_save} ({sentiment_score_to_save:.2f})")
                 
                 if analyzed_posts_count > 0:
                     await db_session.commit()
-                    print(f"  Успешно проанализирована тональность (mock) и сохранено {analyzed_posts_count} постов.")
-                else:
-                    print(f"  Не было проанализировано ни одного поста в этом запуске.")
+                    print(f"  Успешно проанализирована тональность и сохранено {analyzed_posts_count} постов.")
+                # else: # Убрал этот else, т.к. если ничего не обработано, это уже выводится выше
+                #     print(f"  Не было проанализировано ни одного поста в этом запуске (возможно, из-за ошибок или пустых ответов LLM).")
 
-            return f"Анализ тональности (mock) завершен. Обработано: {analyzed_posts_count} постов."
-
+            return f"Анализ тональности завершен. Обработано: {analyzed_posts_count} постов."
+        # ... (finally блок без изменений) ...
         except Exception as e_async_analyzer:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_sentiment_analyzer: {type(e_async_analyzer).__name__} {e_async_analyzer}")
             traceback.print_exc()
@@ -644,7 +738,7 @@ def analyze_posts_sentiment_task(self, limit_posts_to_analyze=10):
         finally:
             if local_async_engine:
                 await local_async_engine.dispose()
-
+    # ... (try/except для запуска _async_main_logic_sentiment_analyzer и retry без изменений) ...
     try:
         result_message = asyncio.run(_async_main_logic_sentiment_analyzer())
         task_duration = time.time() - task_start_time

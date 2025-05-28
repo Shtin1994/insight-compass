@@ -156,3 +156,8 @@ async def run_daily_digest_task_endpoint(background_tasks: BackgroundTasks):
 @app.get("/")
 async def root():
     return {"message": "Welcome to Insight Compass API"}
+
+@app.post("/run-sentiment-analysis-task/", summary="Запустить задачу анализа тональности постов")
+async def run_sentiment_analysis_task_endpoint():
+    tasks.analyze_posts_sentiment_task.delay(limit_posts_to_analyze=2) # Анализируем 2 поста для теста
+    return {"message": "Задача анализа тональности постов запущена."}
