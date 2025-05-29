@@ -13,28 +13,27 @@ const fetchData = async (url, options = {}) => {
   try {
     const response = await fetch(url, options);
     if (!response.ok) {
-      // Попытаемся получить детали ошибки из тела ответа, если возможно
       let errorDetail = `Ошибка HTTP: ${response.status} ${response.statusText}`;
       try {
         const errorData = await response.json();
         errorDetail = errorData.detail || errorDetail;
-      } catch (e) {
-        // Не удалось распарсить JSON, используем стандартное сообщение
-      }
+      } catch (e) { /* ignore */ }
       throw new Error(errorDetail);
     }
-    return await response.json();
+    const contentType = response.headers.get("content-type");
+    if (contentType && contentType.indexOf("application/json") !== -1) {
+        return await response.json();
+    } else {
+        return null; 
+    }
   } catch (error) {
     console.error(`Ошибка fetch для URL ${url}:`, error.message);
-    // Перебрасываем ошибку дальше, чтобы компонент мог ее обработать
     throw error; 
   }
 };
 
 /**
  * Загружает список постов с пагинацией.
- * @param {number} page - Номер страницы (начиная с 1).
- * @returns {Promise<{total_posts: number, posts: Array<object>}>}
  */
 export const fetchPostsAPI = async (page = 1) => {
   const skip = (page - 1) * POSTS_PER_PAGE;
@@ -44,12 +43,41 @@ export const fetchPostsAPI = async (page = 1) => {
 
 /**
  * Загружает комментарии для указанного поста с пагинацией.
- * @param {number} postId - ID поста.
- * @param {number} page - Номер страницы комментариев (начиная с 1).
- * @returns {Promise<{total_comments: number, comments: Array<object>}>}
  */
 export const fetchCommentsAPI = async (postId, page = 1) => {
   const skip = (page - 1) * COMMENTS_PER_PAGE;
   const url = `${API_BASE_URL}/posts/${postId}/comments/?skip=${skip}&limit=${COMMENTS_PER_PAGE}`;
+  return fetchData(url);
+};
+
+/**
+ * Загружает общую статистику для дашборда.
+ */
+export const fetchDashboardStatsAPI = async () => {
+  const url = `${API_BASE_URL}/dashboard/stats`;
+  return fetchData(url);
+};
+
+/**
+ * Загружает данные об активности по времени для дашборда.
+ */
+export const fetchActivityOverTimeAPI = async (days = 7) => {
+  const url = `${API_BASE_URL}/dashboard/activity_over_time?days=${days}`;
+  return fetchData(url);
+};
+
+/**
+ * Загружает топ каналов по указанной метрике.
+ */
+export const fetchTopChannelsAPI = async (metric = 'posts', limit = 5, daysPeriod = 7) => {
+  const url = `${API_BASE_URL}/dashboard/top_channels?metric=${metric}&limit=${limit}&days_period=${daysPeriod}`;
+  return fetchData(url);
+};
+
+/**
+ * Загружает данные о распределении тональности постов.
+ */
+export const fetchSentimentDistributionAPI = async (daysPeriod = 7) => {
+  const url = `${API_BASE_URL}/dashboard/sentiment_distribution?days_period=${daysPeriod}`;
   return fetchData(url);
 };
