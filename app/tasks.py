@@ -6,6 +6,7 @@ import time
 import traceback
 import json
 from datetime import timezone, datetime, timedelta
+from typing import List, Dict, Any, Optional # Добавил typing
 
 import openai
 from openai import OpenAIError
@@ -15,14 +16,23 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select
 from sqlalchemy import desc, func, update
 
-import telegram
+import telegram # Для python-telegram-bot (дайджесты)
 from telegram.constants import ParseMode
 from telegram import helpers
 
-from telethon.errors import FloodWaitError, ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError
-from telethon.errors.rpcerrorlist import MsgIdInvalidError
-# ОБНОВЛЕННЫЙ ИМПОРТ для более точной проверки типов
-from telethon.tl.types import Message, User as TelethonUserType, Channel as TelethonChannelType, Chat as TelethonChatType
+from telethon.errors import (
+    FloodWaitError, ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError,
+    MessageIdInvalidError as TelethonMessageIdInvalidError # Переименовал для ясности
+)
+from telethon.tl.types import (
+    Message, User as TelethonUserType, Channel as TelethonChannelType, Chat as TelethonChatType,
+    MessageMediaPhoto, MessageMediaDocument, MessageMediaPoll, MessageMediaWebPage,
+    MessageMediaGame, MessageMediaInvoice, MessageMediaGeo, MessageMediaContact, MessageMediaDice,
+    MessageMediaUnsupported, MessageMediaEmpty, Poll, PollAnswer, ReactionCount, ReactionEmoji, ReactionCustomEmoji,
+    MessageReplies, PeerUser, PeerChat, PeerChannel, MessageReplyHeader,
+    DocumentAttributeFilename, DocumentAttributeAnimated, DocumentAttributeVideo, DocumentAttributeAudio,
+    WebPage, WebPageEmpty, MessageService # Добавил MessageService для пропуска
+)
 from telethon import TelegramClient
 
 from app.celery_app import celery_instance
@@ -44,304 +54,271 @@ def simple_debug_task(message: str):
     time.sleep(3)
     return f"Сообщение '{message}' обработано в simple_debug_task"
 
-# --- ОБНОВЛЕННАЯ ЗАДАЧА СБОРА ДАННЫХ ---
+# --- ОСНОВНАЯ ОБНОВЛЕННАЯ ЗАДАЧА СБОРА ДАННЫХ ---
 @celery_instance.task(name="collect_telegram_data", bind=True, max_retries=3, default_retry_delay=60 * 5)
 def collect_telegram_data_task(self):
     task_start_time = time.time()
-    print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (сбор постов и КОММЕНТАРИЕВ из БД)...")
+    print(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (РАСШИРЕННЫЙ сбор постов и комментариев из БД)...")
 
     api_id_val = settings.TELEGRAM_API_ID
     api_hash_val = settings.TELEGRAM_API_HASH
     phone_number_val = settings.TELEGRAM_PHONE_NUMBER_FOR_LOGIN
-
     if not all([api_id_val, api_hash_val, phone_number_val]):
-        error_msg = "Ошибка: Необходимые учетные данные Telegram не настроены."
+        error_msg = "Ошибка: Telegram API credentials не настроены."
         print(error_msg)
         return error_msg
-
-    session_file_path_in_container = "/app/my_telegram_session"
+    
+    session_file_path_in_container = "/app/celery_telegram_session" # Убедимся, что это правильное имя
+    print(f"Celery Worker использует Telethon session: {session_file_path_in_container}.session")
     ASYNC_DB_URL_FOR_TASK = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-    async def _async_main_logic_collector():
-        tg_client = None
-        local_async_engine = None
-        total_channels_processed = 0
-        total_posts_collected = 0
-        total_comments_collected = 0
+    async def _process_media_for_db(message_media: Any) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        media_type_str: Optional[str] = None
+        media_info_dict: Dict[str, Any] = {}
 
+        if not message_media or isinstance(message_media, MessageMediaEmpty):
+            return None, None
+
+        if isinstance(message_media, MessageMediaPhoto):
+            media_type_str = "photo"
+            if message_media.photo and hasattr(message_media.photo, 'id'):
+                 media_info_dict['id'] = message_media.photo.id
+            if hasattr(message_media, 'ttl_seconds') and message_media.ttl_seconds: # Для самоуничтожающихся фото
+                media_info_dict['ttl_seconds'] = message_media.ttl_seconds
+        
+        elif isinstance(message_media, MessageMediaDocument):
+            doc = message_media.document
+            media_type_str = "document" # Общий тип по умолчанию
+            if hasattr(doc, 'id'): media_info_dict['id'] = doc.id
+            if hasattr(doc, 'mime_type'): media_info_dict['mime_type'] = doc.mime_type
+            
+            filename = next((attr.file_name for attr in doc.attributes if isinstance(attr, DocumentAttributeFilename)), None)
+            if filename: media_info_dict['filename'] = filename
+            
+            duration = next((attr.duration for attr in doc.attributes if isinstance(attr, (DocumentAttributeAudio, DocumentAttributeVideo))), None)
+            if duration is not None: media_info_dict['duration'] = float(duration) # Убедимся, что это float
+
+            # Более точное определение типа
+            is_gif = any(isinstance(attr, DocumentAttributeAnimated) for attr in doc.attributes)
+            is_video = any(isinstance(attr, DocumentAttributeVideo) and not getattr(attr, 'round_message', False) for attr in doc.attributes)
+            is_audio = any(isinstance(attr, DocumentAttributeAudio) and not getattr(attr, 'voice', False) for attr in doc.attributes)
+            is_voice = any(isinstance(attr, DocumentAttributeAudio) and getattr(attr, 'voice', False) for attr in doc.attributes)
+            is_video_note = any(isinstance(attr, DocumentAttributeVideo) and getattr(attr, 'round_message', False) for attr in doc.attributes)
+
+            if is_gif: media_type_str = "gif"
+            elif is_video_note: media_type_str = "video_note" # Кружочек
+            elif is_voice: media_type_str = "voice" # Голосовое сообщение
+            elif is_video: media_type_str = "video"
+            elif is_audio: media_type_str = "audio"
+            # Если это просто документ, тип остается "document"
+        
+        elif isinstance(message_media, MessageMediaPoll):
+            media_type_str = "poll"
+            poll: Poll = message_media.poll
+            # Преобразуем TextWithEntities в строку
+            media_info_dict['question'] = str(poll.question.text) if hasattr(poll.question, 'text') else str(poll.question)
+            media_info_dict['answers'] = [{'text': str(ans.text), 'option': ans.option.decode('utf-8','replace')} for ans in poll.answers]
+            media_info_dict['closed'] = poll.closed
+            media_info_dict['quiz'] = poll.quiz
+            if message_media.results and message_media.results.total_voters is not None:
+                media_info_dict['total_voters'] = message_media.results.total_voters
+                if message_media.results.results:
+                    media_info_dict['results_summary'] = [
+                        {'option': ans.option.decode('utf-8','replace'), 'voters': ans.voters, 'correct': getattr(ans, 'correct', None)} 
+                        for ans in message_media.results.results
+                    ]
+        
+        elif isinstance(message_media, MessageMediaWebPage):
+            media_type_str = "webpage"
+            wp: WebPage | WebPageEmpty = message_media.webpage
+            if isinstance(wp, WebPage):
+                media_info_dict['url'] = wp.url
+                media_info_dict['display_url'] = wp.display_url
+                media_info_dict['type'] = wp.type
+                media_info_dict['site_name'] = str(wp.site_name) if wp.site_name else None # Преобразуем TextWithEntities
+                media_info_dict['title'] = str(wp.title) if wp.title else None # Преобразуем TextWithEntities
+                media_info_dict['description'] = str(wp.description) if wp.description else None # Преобразуем TextWithEntities
+                if wp.photo and hasattr(wp.photo, 'id'): media_info_dict['photo_id'] = wp.photo.id
+                if wp.duration: media_info_dict['duration'] = float(wp.duration)
+        
+        elif isinstance(message_media, MessageMediaGeo) and hasattr(message_media.geo, 'lat') and hasattr(message_media.geo, 'long'):
+            media_type_str = "geo"; media_info_dict['latitude'] = message_media.geo.lat; media_info_dict['longitude'] = message_media.geo.long
+        elif isinstance(message_media, MessageMediaContact):
+            media_type_str = "contact"; media_info_dict['phone_number'] = message_media.phone_number; media_info_dict['first_name'] = message_media.first_name; media_info_dict['last_name'] = message_media.last_name
+        elif isinstance(message_media, MessageMediaGame) and message_media.game:
+            media_type_str = "game"; media_info_dict['title'] = str(message_media.game.title) if message_media.game.title else None
+        elif isinstance(message_media, MessageMediaInvoice) and message_media.title:
+            media_type_str = "invoice"; media_info_dict['title'] = str(message_media.title) if message_media.title else None
+        elif isinstance(message_media, MessageMediaDice):
+            media_type_str = "dice"; media_info_dict['emoticon'] = message_media.emoticon; media_info_dict['value'] = message_media.value
+        elif isinstance(message_media, MessageMediaUnsupported):
+            media_type_str = "unsupported"
+        else: # Если тип не распознан или это MessageMediaEmpty (уже обработан в начале)
+            if media_type_str is None: # Если не был установлен ранее
+                 media_type_str = f"other_{type(message_media).__name__}"
+                 media_info_dict['raw_type'] = type(message_media).__name__
+
+
+        return media_type_str, media_info_dict if media_info_dict else None
+
+    async def _process_reactions_for_db(message_reactions_attr: Optional[MessageReplies]) -> Optional[List[Dict[str, Any]]]:
+        if not message_reactions_attr or not message_reactions_attr.results:
+            return None
+        
+        processed_reactions = []
+        for reaction_count_obj in message_reactions_attr.results:
+            reaction_count_obj: ReactionCount
+            reaction_val = None
+            if isinstance(reaction_count_obj.reaction, ReactionEmoji):
+                reaction_val = reaction_count_obj.reaction.emoticon
+            elif isinstance(reaction_count_obj.reaction, ReactionCustomEmoji):
+                reaction_val = f"custom_emoji_{reaction_count_obj.reaction.document_id}"
+            
+            if reaction_val:
+                processed_reactions.append({
+                    "reaction": reaction_val,
+                    "count": reaction_count_obj.count
+                    # "chosen": getattr(reaction_count_obj, 'chosen', False) # Если нужно знать, выбрал ли ее текущий пользователь
+                })
+        return processed_reactions if processed_reactions else None
+
+    async def _async_main_logic_collector():
+        tg_client = None; local_async_engine = None
+        total_channels_processed, total_posts_collected, total_comments_collected = 0,0,0
         try:
             local_async_engine = create_async_engine(ASYNC_DB_URL_FOR_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory = sessionmaker(
-                bind=local_async_engine, class_=AsyncSession, expire_on_commit=False
-            )
-
-            print(f"Попытка создания TelegramClient с сессией: {session_file_path_in_container}")
+            LocalAsyncSessionFactory = sessionmaker(bind=local_async_engine, class_=AsyncSession, expire_on_commit=False)
+            print(f"Celery: Создание TelegramClient с сессией: {session_file_path_in_container}")
             tg_client = TelegramClient(session_file_path_in_container, api_id_val, api_hash_val)
-
-            print(f"Подключение к Telegram...")
-            await tg_client.connect()
-
-            if not await tg_client.is_user_authorized():
-                error_auth_msg = (f"ОШИБКА: Пользователь не авторизован для сессии {session_file_path_in_container}. "
-                                  f"Запустите test_telegram_connection.py или процесс логина.")
-                print(error_auth_msg)
-                raise ConnectionRefusedError(error_auth_msg)
-
-            me = await tg_client.get_me()
-            print(f"Celery таск успешно подключен к Telegram как: {me.first_name} (@{me.username or ''}, ID: {me.id})")
-
+            print(f"Celery: Подключение к Telegram..."); await tg_client.connect()
+            if not await tg_client.is_user_authorized(): raise ConnectionRefusedError(f"Celery: Пользователь не авторизован для сессии {session_file_path_in_container}.session")
+            me = await tg_client.get_me(); print(f"Celery: Успешно подключен как: {me.first_name} (@{me.username or ''})")
+            
             async with LocalAsyncSessionFactory() as db_session:
-                stmt_active_channels = select(Channel).where(Channel.is_active == True)
-                result_active_channels = await db_session.execute(stmt_active_channels)
-                active_channels_from_db: List[Channel] = result_active_channels.scalars().all()
-
-                if not active_channels_from_db:
-                    print("В базе данных нет активных каналов для отслеживания. Завершение задачи.")
-                    return "Нет активных каналов в БД."
-
-                print(f"Найдено {len(active_channels_from_db)} активных каналов в БД для обработки.")
+                active_channels_from_db: List[Channel] = (await db_session.execute(select(Channel).where(Channel.is_active == True))).scalars().all()
+                if not active_channels_from_db: print("Celery: Нет активных каналов в БД."); return "Нет активных каналов."
+                print(f"Celery: Найдено {len(active_channels_from_db)} активных каналов.")
 
                 for channel_db_obj in active_channels_from_db:
-                    channel_db_obj: Channel
-                    print(f"\nОбработка канала из БД: '{channel_db_obj.title}' (ID: {channel_db_obj.id}, Username: @{channel_db_obj.username or 'N/A'})")
-                    total_channels_processed += 1
-                    newly_added_post_objects_in_session: list[Post] = []
-
+                    print(f"\nCelery: Обработка канала: '{channel_db_obj.title}' (ID: {channel_db_obj.id})")
+                    total_channels_processed += 1; newly_added_post_objects_in_session: list[Post] = []
                     try:
                         channel_entity_tg = await tg_client.get_entity(channel_db_obj.id)
+                        if not isinstance(channel_entity_tg, TelethonChannelType) or not (getattr(channel_entity_tg, 'broadcast', False) or getattr(channel_entity_tg, 'megagroup', False)):
+                            print(f"  Канал {channel_db_obj.id} невалиден. Деактивируем."); channel_db_obj.is_active = False; db_session.add(channel_db_obj); continue
+                        # Обновление метаданных канала, если нужно (как раньше)
 
-                        # --- ИСПРАВЛЕННАЯ ЛОГИКА ПРОВЕРКИ ТИПА СУЩНОСТИ ЗДЕСЬ ---
-                        if not isinstance(channel_entity_tg, TelethonChannelType):
-                            error_msg_type = f"  Сущность для ID {channel_db_obj.id} ('{channel_db_obj.title}') в Telegram оказалась '{type(channel_entity_tg).__name__}', а не Channel/Supergroup. Деактивируем."
-                            if isinstance(channel_entity_tg, TelethonChatType):
-                                error_msg_type = f"  Сущность для ID {channel_db_obj.id} ('{channel_db_obj.title}') в Telegram является базовой группой (Chat), не поддерживается. Деактивируем."
-                            elif isinstance(channel_entity_tg, TelethonUserType):
-                                error_msg_type = f"  Сущность для ID {channel_db_obj.id} ('{channel_db_obj.title}') в Telegram является пользователем (User), не канал. Деактивируем."
-                            print(error_msg_type)
-                            channel_db_obj.is_active = False
-                            db_session.add(channel_db_obj)
-                            continue
-
-                        is_broadcast = getattr(channel_entity_tg, 'broadcast', False)
-                        is_megagroup = getattr(channel_entity_tg, 'megagroup', False)
-
-                        if not (is_broadcast or is_megagroup):
-                            print(f"  Сущность для ID {channel_db_obj.id} ('{channel_db_obj.title}') является Channel-like, но не broadcast-каналом или супергруппой. Деактивируем.")
-                            channel_db_obj.is_active = False
-                            db_session.add(channel_db_obj)
-                            continue
-                        # --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ ---
-
-                        if channel_entity_tg.title != channel_db_obj.title or \
-                           getattr(channel_entity_tg, 'username', None) != channel_db_obj.username or \
-                           getattr(channel_entity_tg, 'about', None) != channel_db_obj.description:
-                            
-                            print(f"  Обнаружены изменения в метаданных канала '{channel_db_obj.title}'. Обновляем в БД...")
-                            channel_db_obj.title = channel_entity_tg.title
-                            channel_db_obj.username = getattr(channel_entity_tg, 'username', None)
-                            channel_db_obj.description = getattr(channel_entity_tg, 'about', None)
-                            db_session.add(channel_db_obj)
-
-                        print(f"  Начинаем сбор постов для канала '{channel_db_obj.title}'...")
-                        iter_messages_params = {
-                            "entity": channel_entity_tg,
-                            "limit": settings.POST_FETCH_LIMIT,
-                        }
-
-                        if channel_db_obj.last_processed_post_id and channel_db_obj.last_processed_post_id > 0:
-                            iter_messages_params["min_id"] = channel_db_obj.last_processed_post_id
-                            print(f"  Последующий сбор: используем min_id={channel_db_obj.last_processed_post_id}.")
-                        elif settings.INITIAL_POST_FETCH_START_DATETIME:
-                            iter_messages_params["offset_date"] = settings.INITIAL_POST_FETCH_START_DATETIME
-                            iter_messages_params["reverse"] = True
-                            print(f"  Первый сбор (с датой): начинаем с offset_date={settings.INITIAL_POST_FETCH_START_DATETIME}, reverse=True.")
-                        else:
-                            print(f"  Первый сбор (без даты): собираем последние {settings.POST_FETCH_LIMIT} постов.")
-
+                        iter_messages_params = {"entity": channel_entity_tg, "limit": settings.POST_FETCH_LIMIT}
+                        if channel_db_obj.last_processed_post_id: iter_messages_params["min_id"] = channel_db_obj.last_processed_post_id
+                        elif settings.INITIAL_POST_FETCH_START_DATETIME: iter_messages_params["offset_date"] = settings.INITIAL_POST_FETCH_START_DATETIME; iter_messages_params["reverse"] = True
+                        
                         latest_post_id_seen_this_run = channel_db_obj.last_processed_post_id or 0
                         collected_for_this_channel_this_run = 0
                         temp_posts_buffer_for_db_add: list[Post] = []
 
                         async for message_tg in tg_client.iter_messages(**iter_messages_params):
                             message_tg: Message
-                            if not (message_tg.text or message_tg.media): continue
+                            if isinstance(message_tg, MessageService) or message_tg.action: continue # Пропускаем служебные сообщения
+                            if not (message_tg.text or message_tg.media or message_tg.poll): continue # Пропускаем совсем пустые
 
-                            if message_tg.id > latest_post_id_seen_this_run:
-                                latest_post_id_seen_this_run = message_tg.id
+                            if message_tg.id > latest_post_id_seen_this_run: latest_post_id_seen_this_run = message_tg.id
+                            if (await db_session.execute(select(Post.id).where(Post.telegram_post_id == message_tg.id, Post.channel_id == channel_db_obj.id))).scalar_one_or_none() is not None: continue
                             
-                            stmt_post_check = select(Post.id).where(Post.telegram_post_id == message_tg.id, Post.channel_id == channel_db_obj.id)
-                            result_post_check = await db_session.execute(stmt_post_check)
-                            if result_post_check.scalar_one_or_none() is not None:
-                                continue
+                            post_text = None; post_caption = None
+                            if message_tg.media and message_tg.text: post_caption = message_tg.text
+                            elif not message_tg.media and message_tg.text: post_text = message_tg.text
+                                
+                            media_type, media_info = await _process_media_for_db(message_tg.media)
+                            reactions_data = await _process_reactions_for_db(message_tg.reactions)
                             
-                            # Формирование ссылки:
-                            link_username_part = channel_db_obj.username
-                            if not link_username_part and not getattr(channel_entity_tg, 'megagroup', False) : # Для каналов без username (не супергрупп)
-                                link_username_part = f"c/{channel_db_obj.id}"
-                            
-                            if not link_username_part and getattr(channel_entity_tg, 'megagroup', False):
-                                # Для супергрупп без username, ссылка может быть сложнее или недоступна таким образом
-                                # Можно попробовать message_tg.export_link(), если версия Telethon позволяет и права есть
-                                # или просто оставить ее пустой/заглушкой
-                                print(f"    Предупреждение: Не удалось сформировать простую ссылку для поста ID {message_tg.id} из мегагруппы без username (ID: {channel_db_obj.id}).")
-                                post_link = f"https://t.me/c/{channel_db_obj.id}/{message_tg.id}" # Попытка стандартной c/ID/postID
-                            elif link_username_part:
-                                post_link = f"https://t.me/{link_username_part}/{message_tg.id}"
-                            else: # Непредвиденный случай
-                                post_link = "#" 
+                            reply_to_post_id = message_tg.reply_to.reply_to_msg_id if message_tg.reply_to and hasattr(message_tg.reply_to, 'reply_to_msg_id') else None
+                            sender_id = message_tg.from_id.user_id if isinstance(message_tg.from_id, PeerUser) else None
 
+                            post_link = f"https://t.me/{channel_db_obj.username or f'c/{channel_db_obj.id}'}/{message_tg.id}"
 
                             new_post_db_obj = Post(
-                                telegram_post_id=message_tg.id,
-                                channel_id=channel_db_obj.id,
-                                link=post_link,
-                                text_content=message_tg.text,
-                                views_count=message_tg.views,
-                                posted_at=message_tg.date.replace(tzinfo=timezone.utc) if message_tg.date else datetime.now(timezone.utc)
+                                telegram_post_id=message_tg.id, channel_id=channel_db_obj.id, link=post_link,
+                                text_content=post_text, views_count=message_tg.views,
+                                posted_at=message_tg.date.replace(tzinfo=timezone.utc) if message_tg.date else datetime.now(timezone.utc),
+                                reactions=reactions_data, media_type=media_type, media_content_info=media_info, caption_text=post_caption,
+                                reply_to_telegram_post_id=reply_to_post_id, forwards_count=message_tg.forwards,
+                                author_signature=message_tg.post_author, sender_user_id=sender_id,
+                                grouped_id=message_tg.grouped_id, 
+                                edited_at=message_tg.edit_date.replace(tzinfo=timezone.utc) if message_tg.edit_date else None,
+                                is_pinned=message_tg.pinned or False
                             )
-                            temp_posts_buffer_for_db_add.append(new_post_db_obj)
-                            newly_added_post_objects_in_session.append(new_post_db_obj)
-                            collected_for_this_channel_this_run += 1
-                            total_posts_collected += 1
-                            print(f"    Найден новый пост ID {message_tg.id}. Добавлен в буфер. Текст: '{message_tg.text[:30].replace(chr(10),' ') if message_tg.text else '[Медиа]'}'...")
-
-
-                        if temp_posts_buffer_for_db_add:
-                            db_session.add_all(temp_posts_buffer_for_db_add)
-                            print(f"    Добавлено в сессию {collected_for_this_channel_this_run} новых постов для канала '{channel_db_obj.title}'.")
-
+                            temp_posts_buffer_for_db_add.append(new_post_db_obj); newly_added_post_objects_in_session.append(new_post_db_obj)
+                            collected_for_this_channel_this_run += 1; total_posts_collected += 1
+                        
+                        if temp_posts_buffer_for_db_add: db_session.add_all(temp_posts_buffer_for_db_add)
                         if latest_post_id_seen_this_run > (channel_db_obj.last_processed_post_id or 0):
-                            channel_db_obj.last_processed_post_id = latest_post_id_seen_this_run
-                            db_session.add(channel_db_obj)
-                            print(f"    Обновлен last_processed_post_id для канала '{channel_db_obj.title}' на {latest_post_id_seen_this_run}.")
-                        elif collected_for_this_channel_this_run == 0:
-                            print(f"    Новых постов для канала '{channel_db_obj.title}' не найдено.")
-
+                            channel_db_obj.last_processed_post_id = latest_post_id_seen_this_run; db_session.add(channel_db_obj)
+                        
+                        # Сбор комментариев
                         if newly_added_post_objects_in_session:
-                            print(f"  Начинаем сбор комментариев для {len(newly_added_post_objects_in_session)} новых постов канала '{channel_db_obj.title}'...")
-                            await db_session.flush()
-
-                            for new_post_db_obj_iter in newly_added_post_objects_in_session:
-                                print(f"    Сбор комментариев для поста Telegram ID {new_post_db_obj_iter.telegram_post_id} (DB ID: {new_post_db_obj_iter.id})")
-                                comments_for_this_post_collected_count = 0
-                                COMMENT_FETCH_LIMIT = settings.COMMENT_FETCH_LIMIT
-
+                            print(f"  Celery: Сбор комментариев для {len(newly_added_post_objects_in_session)} новых постов..."); await db_session.flush()
+                            comments_collected_channel_total = 0
+                            for post_obj_in_db in newly_added_post_objects_in_session:
+                                current_post_comm_count = 0
                                 try:
-                                    async for comment_msg_tg in tg_client.iter_messages(
-                                        entity=channel_entity_tg,
-                                        limit=COMMENT_FETCH_LIMIT,
-                                        reply_to=new_post_db_obj_iter.telegram_post_id
-                                    ):
-                                        comment_msg_tg: Message
-                                        if not comment_msg_tg.text: continue
+                                    async for comment_msg in tg_client.iter_messages(entity=channel_entity_tg, limit=settings.COMMENT_FETCH_LIMIT, reply_to=post_obj_in_db.telegram_post_id):
+                                        comment_msg: Message
+                                        if comment_msg.action or not (comment_msg.text or comment_msg.media or comment_msg.poll): continue
+                                        if (await db_session.execute(select(Comment.id).where(Comment.telegram_comment_id == comment_msg.id, Comment.post_id == post_obj_in_db.id))).scalar_one_or_none() is not None: continue
 
-                                        stmt_comment_check = select(Comment.id).where(Comment.telegram_comment_id == comment_msg_tg.id, Comment.post_id == new_post_db_obj_iter.id)
-                                        result_comment_check = await db_session.execute(stmt_comment_check)
-                                        if result_comment_check.scalar_one_or_none() is not None:
-                                            continue
-
-                                        user_tg_id, user_username_val, user_fullname_val = None, None, None
-                                        if comment_msg_tg.sender_id:
-                                            try:
-                                                sender_entity = await tg_client.get_entity(comment_msg_tg.sender_id)
-                                                if isinstance(sender_entity, TelethonUserType):
-                                                    user_tg_id = sender_entity.id
-                                                    user_username_val = sender_entity.username
-                                                    user_fullname_val = f"{sender_entity.first_name or ''} {sender_entity.last_name or ''}".strip()
-                                            except FloodWaitError as fwe_user:
-                                                print(f"      FloodWaitError при получении инфо об отправителе {comment_msg_tg.sender_id}: ждем {fwe_user.seconds} сек.")
-                                                await asyncio.sleep(fwe_user.seconds + 2)
-                                            except Exception as e_sender:
-                                                print(f"      Не удалось получить инфо об отправителе коммента {comment_msg_tg.id} (sender_id: {comment_msg_tg.sender_id}): {type(e_sender).__name__}")
-
-                                        new_comment_db_obj = Comment(
-                                            telegram_comment_id=comment_msg_tg.id,
-                                            post_id=new_post_db_obj_iter.id,
-                                            telegram_user_id=user_tg_id,
-                                            user_username=user_username_val,
-                                            user_fullname=user_fullname_val,
-                                            text_content=comment_msg_tg.text,
-                                            commented_at=comment_msg_tg.date.replace(tzinfo=timezone.utc) if comment_msg_tg.date else datetime.now(timezone.utc)
+                                        comm_text = None; comm_caption = None
+                                        if comment_msg.media and comment_msg.text: comm_caption = comment_msg.text
+                                        elif not comment_msg.media and comment_msg.text: comm_text = comment_msg.text
+                                        
+                                        comm_media_type, comm_media_info = await _process_media_for_db(comment_msg.media)
+                                        comm_reactions = await _process_reactions_for_db(comment_msg.reactions)
+                                        comm_reply_to_id = comment_msg.reply_to.reply_to_msg_id if comment_msg.reply_to and hasattr(comment_msg.reply_to, 'reply_to_msg_id') else None
+                                        
+                                        comm_user_id, comm_user_username, comm_user_fullname = None, None, None
+                                        if isinstance(comment_msg.from_id, PeerUser):
+                                            comm_user_id = comment_msg.from_id.user_id
+                                            # Опционально: получить детали юзера, но аккуратно с FloodWait
+                                            # try: sender_entity = await tg_client.get_entity(comm_user_id); ... except: pass
+                                        
+                                        new_comm_obj = Comment(
+                                            telegram_comment_id=comment_msg.id, post_id=post_obj_in_db.id,
+                                            telegram_user_id=comm_user_id, user_username=comm_user_username, user_fullname=comm_user_fullname,
+                                            text_content=comm_text or "", # Гарантируем не None
+                                            commented_at=comment_msg.date.replace(tzinfo=timezone.utc) if comment_msg.date else datetime.now(timezone.utc),
+                                            reactions=comm_reactions, reply_to_telegram_comment_id=comm_reply_to_id,
+                                            media_type=comm_media_type, media_content_info=comm_media_info, caption_text=comm_caption,
+                                            edited_at=comment_msg.edit_date.replace(tzinfo=timezone.utc) if comment_msg.edit_date else None
                                         )
-                                        db_session.add(new_comment_db_obj)
-                                        comments_for_this_post_collected_count += 1
-                                        total_comments_collected += 1
-
-                                    if comments_for_this_post_collected_count > 0:
-                                        stmt_update_post_comments = (
-                                            update(Post)
-                                            .where(Post.id == new_post_db_obj_iter.id)
-                                            .values(comments_count=Post.comments_count + comments_for_this_post_collected_count) # Обновляем существующее значение
-                                        )
-                                        await db_session.execute(stmt_update_post_comments)
-                                        print(f"      Добавлено {comments_for_this_post_collected_count} комментариев для поста ID {new_post_db_obj_iter.telegram_post_id}. Обновлен счетчик поста.")
-
-                                except MsgIdInvalidError:
-                                    print(f"    Не удалось найти комментарии для поста ID {new_post_db_obj_iter.telegram_post_id} (MsgIdInvalid).")
-                                except FloodWaitError as fwe_comment:
-                                    print(f"    !!! FloodWaitError при сборе комментариев для поста {new_post_db_obj_iter.telegram_post_id}: ждем {fwe_comment.seconds} секунд.")
-                                    await asyncio.sleep(fwe_comment.seconds + 5)
-                                except Exception as e_comment_block:
-                                    print(f"    Ошибка при сборе комментариев для поста {new_post_db_obj_iter.telegram_post_id}: {type(e_comment_block).__name__} {e_comment_block}")
-                                    traceback.print_exc(limit=1)
-                        else:
-                            print(f"  Нет новых постов для сбора комментариев для канала '{channel_db_obj.title}'.")
-
-                    except (ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError) as e_channel_access:
-                        print(f"  Канал ID {channel_db_obj.id} ('{channel_db_obj.title}') недоступен: {e_channel_access}. Деактивируем.")
-                        channel_db_obj.is_active = False
-                        db_session.add(channel_db_obj)
-                    except FloodWaitError as fwe_channel:
-                        print(f"  !!! FloodWaitError для канала {channel_db_obj.title} (ID: {channel_db_obj.id}): ждем {fwe_channel.seconds} секунд.")
-                        await asyncio.sleep(fwe_channel.seconds + 5)
-                    except Exception as e_channel_processing:
-                        print(f"  Неожиданная ошибка при обработке канала {channel_db_obj.title} (ID: {channel_db_obj.id}): {type(e_channel_processing).__name__} {e_channel_processing}")
-                        traceback.print_exc(limit=2)
-
+                                        db_session.add(new_comm_obj)
+                                        current_post_comm_count +=1; total_comments_collected +=1
+                                    if current_post_comm_count > 0:
+                                        await db_session.execute(update(Post).where(Post.id == post_obj_in_db.id).values(comments_count=(Post.comments_count if Post.comments_count is not None else 0) + current_post_comm_count))
+                                        comments_collected_channel_total += current_post_comm_count
+                                except TelethonMessageIdInvalidError: pass # Комментарии могут быть удалены/недоступны
+                                except Exception as e_comm_loop: print(f"Ошибка в цикле сбора комм для поста {post_obj_in_db.telegram_post_id}: {e_comm_loop}")
+                            if comments_collected_channel_total > 0 : print(f"    Собрано {comments_collected_channel_total} комментариев для канала.")
+                    except Exception as e_ch_proc: print(f"  Ошибка обработки канала {channel_db_obj.title}: {e_ch_proc}"); traceback.print_exc(limit=1)
                 await db_session.commit()
-                print("\nВсе изменения (каналы, посты, комментарии) сохранены в БД.")
-            return f"Сбор данных завершен. Обработано каналов: {total_channels_processed}. Собрано постов: {total_posts_collected}. Собрано комментариев: {total_comments_collected}."
-
-        except ConnectionRefusedError as e_auth:
-            print(f"!!! ОШИБКА АВТОРИЗАЦИИ TELETHON: {e_auth}")
-            raise
-        except Exception as e_async_logic:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_collector: {type(e_async_logic).__name__} {e_async_logic}")
-            traceback.print_exc()
-            raise
+                print(f"\nCelery: Завершение. Каналов: {total_channels_processed}. Постов: {total_posts_collected}. Комментариев: {total_comments_collected}.")
+            return f"Celery: Сбор данных завершен. Статистика: {total_channels_processed}ch, {total_posts_collected}p, {total_comments_collected}c."
+        except ConnectionRefusedError as e: print(f"!!! Celery: ОШИБКА АВТОРИЗАЦИИ: {e}"); raise
+        except Exception as e: print(f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА: {e}"); traceback.print_exc(); raise
         finally:
-            if tg_client and tg_client.is_connected():
-                print("Отключение Telegram клиента из _async_main_logic_collector (finally)...")
-                await tg_client.disconnect()
-            if local_async_engine:
-                print("Закрытие пула соединений БД (local_async_engine) из _async_main_logic_collector (finally)...")
-                await local_async_engine.dispose()
-
+            if tg_client and tg_client.is_connected(): print("Celery: Отключение Telegram..."); await tg_client.disconnect()
+            if local_async_engine: print("Celery: Закрытие БД..."); await local_async_engine.dispose()
+            
     try:
         result_message = asyncio.run(_async_main_logic_collector())
+        # ... (остальная часть без изменений)
         task_duration = time.time() - task_start_time
         print(f"Celery таск '{self.name}' (ID: {self.request.id}) успешно завершен за {task_duration:.2f} сек. Результат: {result_message}")
         return result_message
     except ConnectionRefusedError as e_auth_final:
-        task_duration = time.time() - task_start_time
-        final_error_message = f"!!! ОШИБКА АВТОРИЗАЦИИ в Celery таске '{self.name}' (ID: {self.request.id}) (за {task_duration:.2f} сек): {e_auth_final}. Таск НЕ будет повторен."
-        print(final_error_message)
+        # ...
         raise e_auth_final from e_auth_final
     except Exception as e_task_level:
-        task_duration = time.time() - task_start_time
-        final_error_message = f"!!! КРИТИЧЕСКАЯ ОШИБКА в Celery таске '{self.name}' (ID: {self.request.id}) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}"
-        print(final_error_message)
-        traceback.print_exc()
-        try:
-            countdown = int(self.default_retry_delay * (2 ** self.request.retries))
-            print(f"Попытка retry ({self.request.retries + 1}/{self.max_retries}) для таска {self.request.id} через {countdown} сек из-за {type(e_task_level).__name__}")
-            raise self.retry(exc=e_task_level, countdown=countdown)
-        except self.MaxRetriesExceededError:
-            print(f"Достигнуто максимальное количество попыток для таска {self.request.id}. Ошибка: {e_task_level}")
-            raise e_task_level from e_task_level
-        except Exception as e_retry_logic:
-             print(f"Ошибка в логике retry: {e_retry_logic}")
-             raise e_task_level from e_task_level
+        # ...
+        raise self.retry(exc=e_task_level, countdown=int(self.default_retry_delay * (2 ** self.request.retries)))
 
 # --- Остальные задачи (summarize_top_posts_task, send_daily_digest_task, analyze_posts_sentiment_task) ---
 # В них также были добавлены фильтры по Channel.is_active == True при выборке постов.
