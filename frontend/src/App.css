@@ -1,13 +1,10 @@
 /* frontend/src/App.css */
 
-/* Убедимся, что глобальные стили для body, если они нужны, 
-   находятся в index.css или применены к App напрямую */
-
 .App {
   font-family: sans-serif;
-  text-align: center; /* Центрируем основной заголовок */
-  max-width: 1000px;  /* Ограничиваем максимальную ширину */
-  margin: 0 auto;     /* Центрируем блок App на странице */
+  text-align: center;
+  max-width: 1000px;
+  margin: 0 auto;
   padding: 20px;
 }
 
@@ -21,37 +18,44 @@
 }
 
 main {
-  text-align: left; /* Возвращаем выравнивание по левому краю для контента */
+  text-align: left;
 }
 
-/* Стили для списков (постов и комментариев) */
 .post-list,
-.comment-list {
+.comment-list, /* Добавим .channel-management-page для общих стилей отступов, если нужно */
+.channel-management-page .channel-list { /* Уточним для списка каналов */
   margin-top: 30px;
   padding-top: 20px;
   border-top: 1px solid #eee;
 }
 
-.post-list h2,
-.comment-list h3 {
-  margin-bottom: 15px;
-  color: #444;
-  text-align: center; /* Заголовки секций тоже по центру */
+/* Обертка для секции комментариев, чтобы кнопка "Закрыть" была правильно расположена */
+.comment-section-wrapper h3 {
+  margin-top: 0; /* Убираем верхний отступ у заголовка комментариев, если он внутри обертки */
 }
 
-/* Стили для таблиц */
+
+.post-list h2,
+.comment-list h3,
+.channel-management-page h2, /* Общий стиль для заголовков страниц */
+.channel-management-page .channel-list h3 { /* Для заголовка списка каналов */
+  margin-bottom: 15px;
+  color: #444;
+  text-align: center;
+}
+
 table {
   width: 100%;
-  border-collapse: collapse; /* Убираем двойные рамки */
+  border-collapse: collapse;
   margin-top: 15px;
   font-size: 0.9em;
 }
 
 th, td {
   border: 1px solid #ddd;
-  padding: 10px; /* Увеличим отступы */
+  padding: 10px;
   text-align: left;
-  vertical-align: top; /* Выравнивание по верху для длинных текстов */
+  vertical-align: top;
 }
 
 th {
@@ -60,12 +64,10 @@ th {
   color: #555;
 }
 
-/* Чередование цветов строк для лучшей читаемости (опционально) */
 tbody tr:nth-child(even) {
   background-color: #f9f9f9;
 }
 
-/* Стили для кнопок */
 button {
   padding: 8px 12px;
   border: 1px solid #ccc;
@@ -74,6 +76,7 @@ button {
   cursor: pointer;
   border-radius: 4px;
   font-size: 0.9em;
+  transition: background-color 0.2s ease-in-out; /* Плавный переход для hover */
 }
 
 button:hover {
@@ -86,45 +89,86 @@ button:disabled {
   cursor: not-allowed;
 }
 
-/* Стили для компонента пагинации */
 .pagination {
   margin-top: 20px;
   text-align: center;
+  display: flex;        /* Для выравнивания элементов пагинации */
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap; /* Позволяет переноситься на новую строку, если не влезает */
+  gap: 5px; /* Отступы между элементами пагинации */
 }
 
 .pagination button {
-  margin: 0 5px;
+  /* margin: 0 5px; убрано, используем gap */
+  min-width: 30px; /* Минимальная ширина для кнопок с номерами */
+  padding: 5px 8px;
 }
 
-.pagination span {
-  margin: 0 10px;
+.pagination span { /* Для многоточий и текста (Стр. X из Y) */
+  /* margin: 0 10px; убрано */
   vertical-align: middle;
+  padding: 5px 0; /* Для выравнивания по высоте с кнопками */
 }
 
-/* Заглушки и сообщения */
+.pagination form { /* Для формы ввода номера страницы */
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px; /* Небольшой отступ слева */
+}
+
+.pagination input[type="number"] {
+  width: 60px;
+  text-align: center;
+  padding: 6px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.pagination form button { /* Кнопка "Перейти" */
+  padding: 7px 10px; /* Чуть больше padding, чтобы соответствовать input */
+  margin-left: 5px;
+}
+
+
 p {
   color: #666;
   font-style: italic;
 }
-/* ... (существующие стили) ... */
 
-/* Стили для спиннера */
+/* --- ОБНОВЛЕННЫЕ СТИЛИ ДЛЯ СПИННЕРА --- */
 .spinner-container {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 20px;
-  min-height: 100px; /* Чтобы было видно, если контента мало */
+  padding: 40px 20px; /* Увеличим padding для большего пространства вокруг спиннера */
+  width: 100%; /* Чтобы занимал всю доступную ширину родителя */
+  box-sizing: border-box;
+  /* min-height: 150px; /* Минимальная высота, чтобы спиннер был виден */
+  /* Если спиннер внутри элемента с фиксированной высотой, эта min-height может не понадобиться */
 }
 
-.spinner {
-  border: 4px solid rgba(0, 0, 0, 0.1);
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border-left-color: #09f; /* Можете выбрать другой цвет */
-  animation: spin 1s ease infinite;
+.spinner-container.small { /* Модификатор для маленьких спиннеров, если нужен */
+    padding: 10px;
+    min-height: 50px;
 }
+
+
+.spinner {
+  border: 6px solid rgba(0, 0, 0, 0.1); /* Толще рамка фона */
+  width: 50px;  /* Больше размер */
+  height: 50px; /* Больше размер */
+  border-radius: 50%;
+  border-left-color: #007bff; /* Синий цвет (Bootstrap primary), более заметный */
+  animation: spin 1s ease-in-out infinite; /* Немного изменил анимацию */
+}
+
+.spinner.small { /* Модификатор для маленьких спиннеров */
+    width: 24px;
+    height: 24px;
+    border-width: 3px;
+}
+
 
 @keyframes spin {
   0% {
