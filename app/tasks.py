@@ -297,28 +297,69 @@ def collect_telegram_data_task(self):
                                 except TelethonMessageIdInvalidError: pass # Комментарии могут быть удалены/недоступны
                                 except Exception as e_comm_loop: print(f"Ошибка в цикле сбора комм для поста {post_obj_in_db.telegram_post_id}: {e_comm_loop}")
                             if comments_collected_channel_total > 0 : print(f"    Собрано {comments_collected_channel_total} комментариев для канала.")
-                    except Exception as e_ch_proc: print(f"  Ошибка обработки канала {channel_db_obj.title}: {e_ch_proc}"); traceback.print_exc(limit=1)
-                await db_session.commit()
-                print(f"\nCelery: Завершение. Каналов: {total_channels_processed}. Постов: {total_posts_collected}. Комментариев: {total_comments_collected}.")
-            return f"Celery: Сбор данных завершен. Статистика: {total_channels_processed}ch, {total_posts_collected}p, {total_comments_collected}c."
-        except ConnectionRefusedError as e: print(f"!!! Celery: ОШИБКА АВТОРИЗАЦИИ: {e}"); raise
-        except Exception as e: print(f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА: {e}"); traceback.print_exc(); raise
-        finally:
-            if tg_client and tg_client.is_connected(): print("Celery: Отключение Telegram..."); await tg_client.disconnect()
-            if local_async_engine: print("Celery: Закрытие БД..."); await local_async_engine.dispose()
-            
+                    # app/tasks.py
+# ... (начало функции _async_main_logic_collector и цикл по каналам) ...
+                    # ... (внутри цикла for channel_db_obj in active_channels_from_db:)
+                    # ... (вся логика сбора для одного канала) ...
+                    except Exception as e_ch_proc: 
+                        print(f"  Celery: Ошибка обработки канала '{channel_db_obj.title}': {type(e_ch_proc).__name__} - {e_ch_proc}")
+                        traceback.print_exc(limit=1) # Печатаем traceback для этой конкретной ошибки канала
+                
+                # --- ГЛАВНЫЙ КОММИТ ПОСЛЕ ОБРАБОТКИ ВСЕХ КАНАЛОВ ---
+                await db_session.commit() 
+                print(f"\nCelery: Все изменения (посты, комментарии, каналы) сохранены в БД. Обработано: {total_channels_processed} каналов.")
+                # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+            # Этот return для try-блока внутри async with LocalAsyncSessionFactory()
+            return f"Celery: Сбор данных завершен успешно. Статистика: {total_channels_processed}ch, {total_posts_collected}p, {total_comments_collected}c."
+        
+        except ConnectionRefusedError as e_auth: # Ошибка авторизации Telethon
+            print(f"!!! Celery: ОШИБКА АВТОРИЗАЦИИ TELETHON: {e_auth}")
+            raise # Передаем выше, чтобы Celery НЕ повторял задачу из-за этого (если нет смысла)
+        
+        except Exception as e_async_logic: # Любая другая ошибка внутри основной логики _async_main_logic_collector
+            print(f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА внутри _async_main_logic_collector: {type(e_async_logic).__name__} {e_async_logic}")
+            traceback.print_exc()
+            # Здесь важно решить, нужно ли откатывать транзакцию, если она еще активна.
+            # Но так как мы уже вышли из блока `async with db_session`, сессия должна быть закрыта.
+            # Если ошибка произошла до финального commit(), то ничего не сохранится, что в данном случае может быть приемлемо.
+            raise # Передаем выше, чтобы Celery мог попытаться сделать retry для всей задачи
+        
+        finally: # Этот блок выполнится всегда
+            if tg_client and tg_client.is_connected():
+                print("Celery: Отключение Telegram клиента из _async_main_logic_collector (finally)...")
+                await tg_client.disconnect()
+            if local_async_engine:
+                print("Celery: Закрытие пула соединений БД (local_async_engine) из _async_main_logic_collector (finally)...")
+                await local_async_engine.dispose()
+
+    # Это основной try/except/finally для всей Celery-задачи (синхронной обертки)
     try:
         result_message = asyncio.run(_async_main_logic_collector())
-        # ... (остальная часть без изменений)
         task_duration = time.time() - task_start_time
-        print(f"Celery таск '{self.name}' (ID: {self.request.id}) успешно завершен за {task_duration:.2f} сек. Результат: {result_message}")
+        print(f"Celery таск '{self.name}' (ID: {self.request.id}) УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
         return result_message
     except ConnectionRefusedError as e_auth_final:
-        # ...
-        raise e_auth_final from e_auth_final
-    except Exception as e_task_level:
-        # ...
-        raise self.retry(exc=e_task_level, countdown=int(self.default_retry_delay * (2 ** self.request.retries)))
+        task_duration = time.time() - task_start_time
+        final_error_message = f"!!! Celery: ОШИБКА АВТОРИЗАЦИИ в таске '{self.name}' (ID: {self.request.id}) (за {task_duration:.2f} сек): {e_auth_final}. Таск НЕ будет повторен."
+        print(final_error_message)
+        raise e_auth_final from e_auth_final # Просто пробрасываем, Celery ее обработает как failed
+    except Exception as e_task_level: # Все остальные ошибки могут быть временными
+        task_duration = time.time() - task_start_time
+        final_error_message = f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (ID: {self.request.id}) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}"
+        print(final_error_message)
+        traceback.print_exc()
+        try:
+            # Пытаемся перезапустить задачу с экспоненциальной задержкой
+            countdown = int(self.default_retry_delay * (2 ** self.request.retries))
+            print(f"Celery: Попытка retry ({self.request.retries + 1}/{self.max_retries}) для таска {self.request.id} через {countdown} сек из-за {type(e_task_level).__name__}")
+            raise self.retry(exc=e_task_level, countdown=countdown) # Используем self.retry
+        except self.MaxRetriesExceededError: # self.MaxRetriesExceededError из celery.exceptions
+            print(f"Celery: Достигнуто максимальное количество попыток для таска {self.request.id}. Ошибка: {e_task_level}")
+            raise e_task_level from e_task_level # Передаем выше как окончательный провал
+        except Exception as e_retry_logic: # Ловим ошибки в самой логике retry, если они есть
+             print(f"Celery: Ошибка в логике retry: {e_retry_logic}")
+             raise e_task_level from e_task_level # Передаем оригинальную ошибку, так как retry не сработал
 
 # --- Остальные задачи (summarize_top_posts_task, send_daily_digest_task, analyze_posts_sentiment_task) ---
 # В них также были добавлены фильтры по Channel.is_active == True при выборке постов.
