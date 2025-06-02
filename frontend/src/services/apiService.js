@@ -1,7 +1,6 @@
 // frontend/src/services/apiService.js
-// ЗАМЕНИТЕ СОДЕРЖИМОЕ ФАЙЛА НА ЭТО:
 
-import { API_BASE_URL, POSTS_PER_PAGE, COMMENTS_PER_PAGE, DEFAULT_SORT_BY, DEFAULT_SORT_ORDER } from '../config'; // Добавлены DEFAULT_SORT_BY, DEFAULT_SORT_ORDER
+import { API_BASE_URL, POSTS_PER_PAGE, COMMENTS_PER_PAGE, DEFAULT_SORT_BY, DEFAULT_SORT_ORDER } from '../config';
 
 /**
  * Базовая функция для выполнения fetch запросов и обработки ответа.
@@ -25,7 +24,7 @@ const fetchData = async (url, options = {}) => {
       throw new Error(errorDetail);
     }
     const contentType = response.headers.get("content-type");
-    if (response.status === 204 || !contentType || !contentType.includes("application/json")) { // Улучшена проверка contentType
+    if (response.status === 204 || !contentType || !contentType.includes("application/json")) {
         return null;
     }
     return await response.json();
@@ -45,12 +44,10 @@ const fetchData = async (url, options = {}) => {
 export const fetchPostsAPI = async (
   page = 1, 
   searchQuery = null, 
-  sortBy = DEFAULT_SORT_BY, // Используем значения по умолчанию из config
-  sortOrder = DEFAULT_SORT_ORDER // Используем значения по умолчанию из config
+  sortBy = DEFAULT_SORT_BY,
+  sortOrder = DEFAULT_SORT_ORDER
 ) => {
-  // Согласно вашему отчету, бэкенд ожидает 'page' и 'limit'.
   let url = `${API_BASE_URL}/posts/?page=${page}&limit=${POSTS_PER_PAGE}`;
-
   if (searchQuery && searchQuery.trim() !== '') {
     url += `&search_query=${encodeURIComponent(searchQuery.trim())}`;
   }
@@ -67,10 +64,6 @@ export const fetchPostsAPI = async (
  * Загружает комментарии для указанного поста с пагинацией.
  */
 export const fetchCommentsAPI = async (postId, page = 1) => {
-  // Бэкенд для комментариев может ожидать skip/limit или page/limit.
-  // Если он ожидает page/limit, то:
-  // const url = `${API_BASE_URL}/posts/${postId}/comments/?page=${page}&limit=${COMMENTS_PER_PAGE}`;
-  // Если он ожидает skip/limit, как в вашем исходном коде:
   const skip = (page - 1) * COMMENTS_PER_PAGE;
   const url = `${API_BASE_URL}/posts/${postId}/comments/?skip=${skip}&limit=${COMMENTS_PER_PAGE}`;
   return fetchData(url);
@@ -108,11 +101,8 @@ export const fetchSentimentDistributionAPI = async (daysPeriod = 7) => {
   return fetchData(url);
 };
 
-// --- Функции для работы с каналами (без изменений) ---
+// --- Функции для работы с каналами ---
 export const fetchChannelsAPI = async (page = 1, limit = 10) => {
-  // Если бэкенд для каналов ожидает page/limit:
-  // const url = `${API_BASE_URL}/channels/?page=${page}&limit=${limit}`;
-  // Если он ожидает skip/limit, как в вашем исходном коде:
   const skip = (page - 1) * limit;
   const url = `${API_BASE_URL}/channels/?skip=${skip}&limit=${limit}`;
   return fetchData(url);
@@ -145,3 +135,15 @@ export const fetchChannelDetailsAPI = async (channelId) => {
   const url = `${API_BASE_URL}/channels/${channelId}/`;
   return fetchData(url);
 };
+
+// --- НАЧАЛО: Новая функция для получения AI-инсайтов из комментариев ---
+/**
+ * Загружает агрегированные AI-инсайты из комментариев.
+ * @param {number} daysPeriod - Период в днях для анализа.
+ * @param {number} topN - Количество топовых элементов для каждой категории.
+ */
+export const fetchCommentInsightsAPI = async (daysPeriod = 7, topN = 10) => {
+  const url = `${API_BASE_URL}/dashboard/comment_insights?days_period=${daysPeriod}&top_n=${topN}`;
+  return fetchData(url);
+};
+// --- КОНЕЦ: Новая функция ---

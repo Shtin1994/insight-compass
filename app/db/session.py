@@ -1,50 +1,68 @@
+# app/db/session.py
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
+from contextlib import asynccontextmanager # <--- ДОБАВЛЕНО
+from typing import AsyncGenerator         # <--- ДОБАВЛЕНО
+
 from app.core.config import settings # Наши настройки, включая DATABASE_URL
 
-# Создаем асинхронный движок SQLAlchemy
-# settings.DATABASE_URL должен быть асинхронным, т.е. начинаться с postgresql+asyncpg://
-# Если settings.DATABASE_URL у вас сейчас postgresql://, его нужно будет обновить.
-# Давайте проверим и обновим DATABASE_URL в app/core/config.py
-
 # Асинхронный URL для PostgreSQL
-ASYNC_DATABASE_URL = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+# Ваш config.py уже должен предоставлять settings.DATABASE_URL в формате postgresql+asyncpg://
+# благодаря свойству @property. Поэтому здесь дополнительное .replace() не нужно,
+# если вы используете обновленный config.py, который я предлагал.
+# Если же settings.DATABASE_URL все еще "чистый" postgresql://, то .replace() нужен.
+# Для безопасности, я оставлю .replace(), но в идеале config.py должен давать готовую строку.
+ASYNC_DATABASE_URL = settings.DATABASE_URL 
+if not ASYNC_DATABASE_URL.startswith("postgresql+asyncpg://"):
+    ASYNC_DATABASE_URL = ASYNC_DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
 
 async_engine = create_async_engine(
     ASYNC_DATABASE_URL,
-    echo=False, # Установите True для логгирования SQL-запросов (полезно для отладки)
-    pool_pre_ping=True # Проверять соединение перед использованием из пула
+    echo=False, 
+    pool_pre_ping=True
 )
 
-# Создаем фабрику асинхронных сессий
+# Создаем фабрику асинхронных сессий (остается вашей AsyncSessionFactory)
 AsyncSessionFactory = sessionmaker(
     bind=async_engine,
     class_=AsyncSession,
-    expire_on_commit=False # Важно для асинхронных сессий, чтобы объекты были доступны после коммита
+    expire_on_commit=False,
+    autoflush=False, # Рекомендуется для async
+    autocommit=False # Рекомендуется для async
 )
 
-async def get_async_db() -> AsyncSession:
+async def get_async_db() -> AsyncGenerator[AsyncSession, None]: # Изменил возвращаемый тип для соответствия генератору
     """
     Зависимость FastAPI для получения асинхронной сессии базы данных.
     """
     async with AsyncSessionFactory() as session:
         try:
             yield session
-            await session.commit() # Коммит транзакции, если все успешно
+            await session.commit() 
         except Exception:
-            await session.rollback() # Откат транзакции при ошибке
+            await session.rollback() 
             raise
         finally:
             await session.close()
 
-# Можно также создать синхронный движок и сессию, если где-то понадобится
-# from sqlalchemy import create_engine
-# SYNC_DATABASE_URL = settings.DATABASE_URL
-# sync_engine = create_engine(SYNC_DATABASE_URL, pool_pre_ping=True)
-# SyncSessionFactory = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
-# def get_sync_db():
-#     db = SyncSessionFactory()
-#     try:
-#         yield db
-#     finally:
-#         db.close()
+# --- НАЧАЛО: НОВЫЙ КОНТЕКСТНЫЙ МЕНЕДЖЕР ДЛЯ CELERY ---
+@asynccontextmanager
+async def get_async_session_context_manager() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Асинхронный контекстный менеджер для предоставления сессии SQLAlchemy.
+    Используется, например, в задачах Celery.
+    """
+    async with AsyncSessionFactory() as session: # Используем вашу AsyncSessionFactory
+        try:
+            yield session
+            # Коммит не делается здесь автоматически, задача сама должна решить, когда коммитить
+            # await session.commit() 
+        except Exception:
+            # Важно откатить сессию при ошибке, чтобы не оставить транзакцию "висеть"
+            await session.rollback()
+            raise
+        finally:
+            # Закрытие сессии также важно
+            await session.close()
+# --- КОНЕЦ: НОВЫЙ КОНТЕКСТНЫЙ МЕНЕДЖЕР ДЛЯ CELERY ---

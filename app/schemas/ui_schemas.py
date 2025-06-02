@@ -2,22 +2,22 @@
 
 from pydantic import BaseModel, Field
 from datetime import datetime, date
-from typing import List, Optional, Any, Dict # Добавил Dict для типизации reactions
+from typing import List, Optional, Any, Dict
 
 # --- Существующие схемы ---
 
 class ChannelInfo(BaseModel):
-    id: int
+    id: int # В вашей модели Channel id - BigInteger, но Pydantic int обычно справляется. Если будут проблемы, можно использовать conint.
     title: str
     username: Optional[str] = None
     class Config:
-        from_attributes = True # orm_mode в Pydantic v1
+        from_attributes = True
 
-class PostListItem(BaseModel): # <--- ЗДЕСЬ ОСНОВНЫЕ ИЗМЕНЕНИЯ
+class PostListItem(BaseModel):
     id: int
     channel: ChannelInfo
     text_content: Optional[str] = None
-    caption_text: Optional[str] = None       # Текст подписи к медиа
+    caption_text: Optional[str] = None
     posted_at: datetime
     comments_count: int
     link: str
@@ -25,20 +25,17 @@ class PostListItem(BaseModel): # <--- ЗДЕСЬ ОСНОВНЫЕ ИЗМЕНЕН
     post_sentiment_label: Optional[str] = None
     post_sentiment_score: Optional[float] = None
     
-    # Поля, добавленные для отладки сортировки и для большей информативности
     views_count: Optional[int] = None
     forwards_count: Optional[int] = None
-    reactions: Optional[List[Dict[str, Any]]] = None # Список словарей для реакций
+    reactions: Optional[List[Dict[str, Any]]] = None 
     
-    # Другие новые поля из модели Post, которые могут быть полезны в API
     media_type: Optional[str] = None
-    # media_content_info: Optional[Dict[str, Any]] = None # Если нужна детальная инфо о медиа
     reply_to_telegram_post_id: Optional[int] = None
     author_signature: Optional[str] = None
-    sender_user_id: Optional[int] = None # Используем int, т.к. в модели BigInteger, но ID обычно int
-    grouped_id: Optional[int] = None       # Аналогично, BigInteger в модели, но ID часто int
+    sender_user_id: Optional[int] = None 
+    grouped_id: Optional[int] = None       
     edited_at: Optional[datetime] = None
-    is_pinned: Optional[bool] = None # Сделаем Optional, т.к. default=False в модели
+    is_pinned: Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -49,9 +46,8 @@ class PaginatedPostsResponse(BaseModel):
 
 class CommentListItem(BaseModel):
     id: int
-    author_display_name: str
-    text: str # Основной текст комментария
-    # Можно добавить и сюда caption_text, media_type, reactions для комментариев, если нужно будет выводить
+    author_display_name: str # Это поле формируется в эндпоинте, его нет в модели Comment напрямую
+    text: Optional[str] = None # Изменил на Optional, т.к. text_content в модели теперь nullable
     commented_at: datetime
     class Config:
         from_attributes = True
@@ -68,7 +64,7 @@ class DashboardStatsResponse(BaseModel):
     channels_monitoring_count: int
 
 class ActivityOverTimePoint(BaseModel):
-    activity_date: date # Используем date, т.к. агрегация по дням
+    activity_date: date
     post_count: int
     comment_count: int
 
@@ -76,7 +72,7 @@ class ActivityOverTimeResponse(BaseModel):
     data: List[ActivityOverTimePoint]
 
 class TopChannelItem(BaseModel):
-    channel_id: int
+    channel_id: int # Аналогично ChannelInfo.id
     channel_title: str
     channel_username: Optional[str] = None
     metric_value: int
@@ -86,28 +82,25 @@ class TopChannelsResponse(BaseModel):
     data: List[TopChannelItem]
 
 class SentimentDistributionItem(BaseModel):
-    sentiment_label: str # e.g., "positive", "negative", "neutral", "mixed", "undefined"
+    sentiment_label: str
     count: int
     percentage: float
 
 class SentimentDistributionResponse(BaseModel):
-    total_analyzed_posts: int # Количество постов, для которых есть анализ тональности
+    total_analyzed_posts: int
     data: List[SentimentDistributionItem]
 
-# --- Схемы для управления каналами ---
-
 class ChannelBase(BaseModel):
-    pass # Можно оставить пустым или добавить общие поля, если появятся
+    pass
 
 class ChannelCreateRequest(BaseModel):
     identifier: str = Field(..., description="Telegram channel username (e.g., 'durov') or full link (e.g., 'https://t.me/durov')")
 
 class ChannelUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
-    # custom_title: Optional[str] = None # Пример для будущего расширения
 
 class ChannelResponse(ChannelBase):
-    id: int # Telegram ID канала, который является PK
+    id: int # Аналогично ChannelInfo.id
     title: str
     username: Optional[str] = None
     description: Optional[str] = None
@@ -119,16 +112,28 @@ class ChannelResponse(ChannelBase):
     class Config:
         from_attributes = True
 
-class ChannelListItem(BaseModel):
-    id: int # Telegram ID
+class ChannelListItem(BaseModel): # Переименовал из ChannelListItem в ChannelResponse, если это основная схема для отображения канала. Если это укороченная для списков, то имя ChannelListItem ок.
+    id: int # Аналогично ChannelInfo.id
     title: str
     username: Optional[str] = None
     is_active: bool
-    # last_fetched_at: Optional[datetime] = None # Пример для будущего расширения
-
+    
     class Config:
         from_attributes = True
 
 class PaginatedChannelsResponse(BaseModel):
     total_channels: int
-    channels: List[ChannelListItem]
+    channels: List[ChannelListItem] # Используем ChannelListItem
+
+# --- НАЧАЛО: Новые схемы для AI-инсайтов из комментариев ---
+class InsightItem(BaseModel):
+    text: str  # Текст темы, проблемы, вопроса или предложения
+    count: int # Количество упоминаний
+
+class CommentInsightsResponse(BaseModel):
+    period_days: int
+    top_topics: List[InsightItem]
+    top_problems: List[InsightItem]
+    top_questions: List[InsightItem]
+    top_suggestions: List[InsightItem]
+# --- КОНЕЦ: Новые схемы для AI-инсайтов из комментариев ---
