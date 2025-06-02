@@ -1,6 +1,7 @@
 // frontend/src/services/apiService.js
+// ЗАМЕНИТЕ СОДЕРЖИМОЕ ФАЙЛА НА ЭТО:
 
-import { API_BASE_URL, POSTS_PER_PAGE, COMMENTS_PER_PAGE } from '../config';
+import { API_BASE_URL, POSTS_PER_PAGE, COMMENTS_PER_PAGE, DEFAULT_SORT_BY, DEFAULT_SORT_ORDER } from '../config'; // Добавлены DEFAULT_SORT_BY, DEFAULT_SORT_ORDER
 
 /**
  * Базовая функция для выполнения fetch запросов и обработки ответа.
@@ -24,7 +25,7 @@ const fetchData = async (url, options = {}) => {
       throw new Error(errorDetail);
     }
     const contentType = response.headers.get("content-type");
-    if (response.status === 204 || !contentType || contentType.indexOf("application/json") === -1) {
+    if (response.status === 204 || !contentType || !contentType.includes("application/json")) { // Улучшена проверка contentType
         return null;
     }
     return await response.json();
@@ -35,16 +36,29 @@ const fetchData = async (url, options = {}) => {
 };
 
 /**
- * Загружает список постов с пагинацией и опциональным поисковым запросом.
+ * Загружает список постов с пагинацией, опциональным поисковым запросом и сортировкой.
  * @param {number} page - Номер страницы.
  * @param {string} [searchQuery] - Опциональный поисковый запрос.
+ * @param {string} [sortBy] - Поле для сортировки.
+ * @param {string} [sortOrder] - Порядок сортировки ('asc' или 'desc').
  */
-export const fetchPostsAPI = async (page = 1, searchQuery = null) => { // <--- ДОБАВЛЕН ПАРАМЕТР searchQuery
-  const skip = (page - 1) * POSTS_PER_PAGE;
-  let url = `${API_BASE_URL}/posts/?skip=${skip}&limit=${POSTS_PER_PAGE}`;
+export const fetchPostsAPI = async (
+  page = 1, 
+  searchQuery = null, 
+  sortBy = DEFAULT_SORT_BY, // Используем значения по умолчанию из config
+  sortOrder = DEFAULT_SORT_ORDER // Используем значения по умолчанию из config
+) => {
+  // Согласно вашему отчету, бэкенд ожидает 'page' и 'limit'.
+  let url = `${API_BASE_URL}/posts/?page=${page}&limit=${POSTS_PER_PAGE}`;
 
-  if (searchQuery && searchQuery.trim() !== '') { // <--- ДОБАВЛЯЕМ search_query ЕСЛИ ОН ЕСТЬ
+  if (searchQuery && searchQuery.trim() !== '') {
     url += `&search_query=${encodeURIComponent(searchQuery.trim())}`;
+  }
+  if (sortBy) {
+    url += `&sort_by=${encodeURIComponent(sortBy)}`;
+  }
+  if (sortOrder) {
+    url += `&sort_order=${encodeURIComponent(sortOrder)}`;
   }
   return fetchData(url);
 };
@@ -53,6 +67,10 @@ export const fetchPostsAPI = async (page = 1, searchQuery = null) => { // <--- �
  * Загружает комментарии для указанного поста с пагинацией.
  */
 export const fetchCommentsAPI = async (postId, page = 1) => {
+  // Бэкенд для комментариев может ожидать skip/limit или page/limit.
+  // Если он ожидает page/limit, то:
+  // const url = `${API_BASE_URL}/posts/${postId}/comments/?page=${page}&limit=${COMMENTS_PER_PAGE}`;
+  // Если он ожидает skip/limit, как в вашем исходном коде:
   const skip = (page - 1) * COMMENTS_PER_PAGE;
   const url = `${API_BASE_URL}/posts/${postId}/comments/?skip=${skip}&limit=${COMMENTS_PER_PAGE}`;
   return fetchData(url);
@@ -92,6 +110,9 @@ export const fetchSentimentDistributionAPI = async (daysPeriod = 7) => {
 
 // --- Функции для работы с каналами (без изменений) ---
 export const fetchChannelsAPI = async (page = 1, limit = 10) => {
+  // Если бэкенд для каналов ожидает page/limit:
+  // const url = `${API_BASE_URL}/channels/?page=${page}&limit=${limit}`;
+  // Если он ожидает skip/limit, как в вашем исходном коде:
   const skip = (page - 1) * limit;
   const url = `${API_BASE_URL}/channels/?skip=${skip}&limit=${limit}`;
   return fetchData(url);

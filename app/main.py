@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date # Убедимся что SQLDate импортирован, если нужен
+from sqlalchemy import Date as SQLDate # Добавим, если используется в get_activity_over_time
 from typing import List, Optional
 from enum import Enum
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError # Добавим для add_new_channel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, asc, cast, literal_column, nullslast, update, delete, or_, text, Integer as SAInteger, Column as SAColumn
 from sqlalchemy.orm import selectinload, aliased
@@ -19,7 +21,7 @@ from telethon.errors import ChannelPrivateError, UsernameInvalidError, UsernameN
 from telethon.tl.types import Channel as TelethonChannelType, Chat as TelethonChatType, User as TelethonUserType
 
 from . import tasks
-from .models import Post, Comment, Channel
+from .models import Post, Comment, Channel # Убедимся, что все модели импортированы
 from . import models as models_module
 from .db.session import get_async_db, async_engine
 from .celery_app import celery_instance
@@ -27,10 +29,13 @@ from .core.config import settings
 from .schemas import ui_schemas
 
 # --- Логгирование ---
+# (остается без изменений)
 logging.basicConfig(level=logging.INFO); logger = logging.getLogger(__name__); endpoint_logger = logging.getLogger("api_endpoints"); endpoint_logger.setLevel(logging.INFO)
 if not endpoint_logger.handlers and not logging.getLogger().handlers: _handler = logging.StreamHandler(); _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'); _handler.setFormatter(_formatter); endpoint_logger.addHandler(_handler)
 
+
 # --- Глобальный клиент Telethon и FastAPI app ---
+# (остается без изменений)
 telegram_client_instance: Optional[TelegramClient] = None
 async def get_telegram_client() -> TelegramClient:
     global telegram_client_instance
@@ -57,6 +62,7 @@ async def shutdown_event():
 api_v1_router = APIRouter(prefix=settings.API_V1_STR)
 
 # --- ЭНДПОИНТЫ ДЛЯ КАНАЛОВ ---
+# (остаются без изменений)
 @api_v1_router.post("/channels/", response_model=ui_schemas.ChannelResponse, status_code=201)
 async def add_new_channel(channel_data: ui_schemas.ChannelCreateRequest, db: AsyncSession = Depends(get_async_db), tg_client: TelegramClient = Depends(get_telegram_client)):
     endpoint_logger.info(f"POST /channels/ - identifier: {channel_data.identifier}"); channel_identifier = channel_data.identifier.strip()
@@ -118,6 +124,7 @@ async def delete_tracked_channel(channel_id: int, db: AsyncSession = Depends(get
     return None
 
 # --- ЭНДПОИНТЫ ДЛЯ ДАШБОРДА ---
+# (остаются без изменений)
 @api_v1_router.get("/dashboard/stats", response_model=ui_schemas.DashboardStatsResponse)
 async def get_dashboard_stats(db: AsyncSession = Depends(get_async_db)):
     endpoint_logger.info("GET /api/v1/dashboard/stats")
@@ -195,6 +202,7 @@ async def get_sentiment_distribution(days_period: int = Query(7, ge=1, le=365), 
         return ui_schemas.SentimentDistributionResponse(total_analyzed_posts=total_analyzed_posts, data=data_list)
     except Exception as e: endpoint_logger.error(f"Error in get_sentiment_distribution: {e}", exc_info=True); raise HTTPException(status_code=500, detail="Internal server error while fetching sentiment distribution")
 
+
 # --- ENUMs для сортировки ---
 class PostSortByField(str, Enum):
     posted_at = "posted_at"
@@ -213,24 +221,30 @@ def get_comment_author_display_name(comment: models_module.Comment) -> str:
 # --- ОБНОВЛЕННЫЙ ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ ПОСТОВ С СОРТИРОВКОЙ И ПОИСКОМ ---
 @api_v1_router.get("/posts/", response_model=ui_schemas.PaginatedPostsResponse)
 async def get_posts_for_ui(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Принимаем page вместо skip ---
+    page: int = Query(1, ge=1, description="Page number"), 
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    limit: int = Query(10, ge=1, le=100, description="Number of items per page"), # limit остается
     search_query: Optional[str] = Query(None),
     sort_by: PostSortByField = Query(PostSortByField.posted_at),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     db: AsyncSession = Depends(get_async_db)
 ):
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Вычисляем skip из page и limit ---
+    skip = (page - 1) * limit 
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     endpoint_logger.info(
-        f"GET /api/v1/posts/ - skip={skip}, limit={limit}, "
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновляем лог, чтобы показывать page и вычисленный skip ---
+        f"GET /api/v1/posts/ - page={page} (skip={skip}), limit={limit}, "
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         f"search_query='{search_query}', sort_by='{sort_by.value}', sort_order='{sort_order}'"
     )
     try:
         CurrentPostModel = models_module.Post
         CurrentChannelModel = models_module.Channel
 
-        # CTE для вычисления суммы реакций
         p_alias = aliased(CurrentPostModel, name="p_for_reactions_cte")
-
         reaction_elements_cte_subquery = (
             select(
                 p_alias.id.label("post_id_in_cte"),
@@ -241,7 +255,6 @@ async def get_posts_for_ui(
             .where(func.jsonb_typeof(p_alias.reactions) == 'array')
             .cte("reaction_elements_cte")
         )
-
         sum_of_reactions_cte = (
             select(
                 reaction_elements_cte_subquery.c.post_id_in_cte.label("post_id"),
@@ -252,11 +265,10 @@ async def get_posts_for_ui(
         )
         
         posts_select_stmt = select(CurrentPostModel)
-        
         if sort_by == PostSortByField.reactions_total_sum:
             posts_select_stmt = posts_select_stmt.outerjoin(
                 sum_of_reactions_cte, CurrentPostModel.id == sum_of_reactions_cte.c.post_id
-            ).add_columns(sum_of_reactions_cte.c.total_reactions_sum.label("calculated_total_reactions")) # Добавляем alias здесь
+            ).add_columns(sum_of_reactions_cte.c.total_reactions_sum.label("calculated_total_reactions"))
 
         posts_select_stmt = posts_select_stmt.join(
             CurrentChannelModel, CurrentPostModel.channel_id == CurrentChannelModel.id
@@ -267,42 +279,37 @@ async def get_posts_for_ui(
             search_pattern = f"%{search_query}%"
             search_conditions_list = [
                 CurrentPostModel.text_content.ilike(search_pattern),
-                CurrentPostModel.caption_text.ilike(search_pattern), # <--- ДОБАВЛЕН ПОИСК ПО CAPTION_TEXT
+                CurrentPostModel.caption_text.ilike(search_pattern),
                 CurrentPostModel.summary_text.ilike(search_pattern)
             ]
-            # Удаляем None из списка, если какое-то из полей может быть None и ilike на None вызовет ошибку
-            # Хотя SQLAlchemy обычно обрабатывает это нормально (NULL ILIKE '...' is NULL)
             conditions.append(or_(*[cond for cond in search_conditions_list if cond is not None]))
 
         posts_select_stmt = posts_select_stmt.where(*conditions)
 
         count_query = select(func.count(CurrentPostModel.id))\
-            .join(CurrentChannelModel, CurrentPostModel.channel_id == CurrentChannelModel.id)\
-            .where(*conditions)
+            .select_from(posts_select_stmt.with_only_columns(CurrentPostModel.id).alias("sub_count_query")) # Используем with_only_columns для корректного count с CTE и joins
+        
         total_posts_result = await db.execute(count_query)
         total_posts = total_posts_result.scalar_one_or_none() or 0
         
         order_expression = None
         if sort_by == PostSortByField.reactions_total_sum:
-            # Сортируем по колонке total_reactions_sum из sum_of_reactions_cte (которая получила alias calculated_total_reactions)
             order_field = literal_column("calculated_total_reactions") 
-            # ИЗМЕНЕНО: При DESC сортировке NULL значения (нет реакций) будут ПОСЛЕДНИМИ
             order_expression = asc(order_field).nullsfirst() if sort_order == "asc" else desc(order_field).nullslast() 
         else:
             order_field_attr = getattr(CurrentPostModel, sort_by.value, CurrentPostModel.posted_at)
-            
-            if sort_by in [PostSortByField.views_count, PostSortByField.forwards_count]:
-                # ИЗМЕНЕНО: При DESC сортировке NULL значения будут ПОСЛЕДНИМИ
+            if sort_by in [PostSortByField.views_count, PostSortByField.forwards_count, PostSortByField.comments_count]: # Добавил comments_count сюда для nullslast
                 order_expression = asc(order_field_attr).nullsfirst() if sort_order == "asc" else desc(order_field_attr).nullslast()
-            else: # Для posted_at, comments_count (где NULL маловероятен или стандартное поведение ок)
+            else: 
                 order_expression = asc(order_field_attr) if sort_order == "asc" else desc(order_field_attr)
         
+        # --- ИЗМЕНЕНИЕ: Применяем offset(skip) и limit(limit) здесь ---
         final_posts_query = posts_select_stmt.order_by(order_expression)\
             .options(selectinload(CurrentPostModel.channel))\
             .offset(skip)\
             .limit(limit)
             
-        results = await db.execute(final_posts_query) # <--- Эта строка должна быть здесь
+        results = await db.execute(final_posts_query)
         
         if sort_by == PostSortByField.reactions_total_sum:
             posts_scalars = [row[0] for row in results.all()] 
@@ -319,6 +326,7 @@ async def get_posts_for_ui(
         raise HTTPException(status_code=500, detail="Internal server error while fetching posts")
 
 # --- ЭНДПОИНТ ДЛЯ КОММЕНТАРИЕВ ---
+# (остается без изменений)
 @api_v1_router.get("/posts/{post_id}/comments/", response_model=ui_schemas.PaginatedCommentsResponse)
 async def get_comments_for_post_ui(post_id: int, skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100), db: AsyncSession = Depends(get_async_db)):
     endpoint_logger.info(f"GET /api/v1/posts/{post_id}/comments/ - skip={skip}, limit={limit}")
@@ -339,6 +347,7 @@ async def get_comments_for_post_ui(post_id: int, skip: int = Query(0, ge=0), lim
         raise HTTPException(status_code=500, detail=f"Internal server error while fetching comments for post {post_id}")
 
 # --- ЭНДПОИНТЫ ДЛЯ CELERY ---
+# (остаются без изменений)
 @api_v1_router.post("/run-collection-task/", summary="Запустить задачу сбора данных")
 async def run_collection_task_endpoint(): tasks.collect_telegram_data_task.delay(); return {"message": "Задача сбора данных запущена."}
 @api_v1_router.post("/run-summarization-task/", summary="Запустить задачу суммаризации")
@@ -347,6 +356,7 @@ async def run_summarization_task_endpoint(): tasks.summarize_top_posts_task.dela
 async def run_daily_digest_task_endpoint(): tasks.send_daily_digest_task.delay(); return {"message": "Задача дайджеста запущена."}
 @api_v1_router.post("/run-sentiment-analysis-task/", summary="Запустить задачу анализа тональности")
 async def run_sentiment_analysis_task_endpoint(): tasks.analyze_posts_sentiment_task.delay(limit_posts_to_analyze=settings.POST_FETCH_LIMIT or 5); return {"message": "Задача анализа тональности запущена."}
+
 
 app.include_router(api_v1_router)
 @app.get("/")
