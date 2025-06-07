@@ -17,37 +17,22 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "db"
     POSTGRES_PORT: int = 5432
 
-    # --- НАЧАЛО: Добавлена переменная для Alembic, если основная строка используется приложением ---
-    # Если DATABASE_URL используется другими частями приложения и уже имеет +asyncpg,
-    # то эта переменная может быть не нужна, и в env.py можно использовать DATABASE_URL.
-    # Если же DATABASE_URL "чистая" (postgresql://), то для Alembic (который синхронный)
-    # она подходит, а для async задач мы ее модифицируем.
-    # Для простоты, сейчас предполагаем, что DATABASE_URL "чистая".
-    # Если Alembic уже работает с вашей текущей DATABASE_URL, эту переменную можно не добавлять.
-    # Я ее добавлю, чтобы показать, как можно разделить строки, если это нужно.
-    DATABASE_URL_FOR_ALEMBIC: Optional[str] = None # Например, postgresql://user:pass@host:port/db
-    # --- КОНЕЦ: Добавлена переменная для Alembic ---
+    DATABASE_URL_FOR_ALEMBIC: Optional[str] = None 
 
     @property
     def DATABASE_URL(self) -> str:
-        # Эта строка будет использоваться для асинхронных операций (asyncpg)
-        # Если DATABASE_URL_FOR_ALEMBIC задана, используем ее для формирования "чистой" строки,
-        # а затем добавляем +asyncpg. Если нет, формируем из обычных переменных.
         base_db_url: str
         if self.DATABASE_URL_FOR_ALEMBIC:
-            # Убираем +asyncpg, если он там есть, для единообразия
             base_db_url = self.DATABASE_URL_FOR_ALEMBIC.replace("+asyncpg", "")
         else:
             base_db_url = f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         
-        if "postgresql+asyncpg://" not in base_db_url:
-             # Для async задач нам нужна строка с asyncpg
-             # Убедимся, что заменяем postgresql://, а не просто добавляем, если вдруг там уже есть префикс
+        if not base_db_url.startswith("postgresql+asyncpg://"):
             if base_db_url.startswith("postgresql://"):
                 return base_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            else: # На случай если строка вообще без схемы, хотя это маловероятно
+            else: 
                 return f"postgresql+asyncpg://{base_db_url}" 
-        return base_db_url # Если уже содержит +asyncpg, возвращаем как есть
+        return base_db_url
 
 
     REDIS_HOST: str = "redis"
@@ -61,13 +46,11 @@ class Settings(BaseSettings):
     TELEGRAM_TARGET_CHAT_ID: Optional[str] = None
 
     OPENAI_API_KEY: Optional[str] = None
-    # --- НАЧАЛО: Новые настройки для LLM ---
     OPENAI_DEFAULT_MODEL: Optional[str] = "gpt-3.5-turbo"
-    OPENAI_DEFAULT_MODEL_FOR_TASKS: Optional[str] = "gpt-3.5-turbo-1106" # Рекомендуется модель с поддержкой JSON mode
+    OPENAI_DEFAULT_MODEL_FOR_TASKS: Optional[str] = "gpt-3.5-turbo-1106" 
     OPENAI_API_URL: Optional[str] = "https://api.openai.com/v1/chat/completions"
     OPENAI_TIMEOUT_SECONDS: Optional[float] = 60.0
-    LLM_MAX_PROMPT_LENGTH: Optional[int] = 3800 # Макс. длина промпта для обрезки текста комментария
-    # --- КОНЕЦ: Новые настройки для LLM ---
+    LLM_MAX_PROMPT_LENGTH: Optional[int] = 3800 
     
     TARGET_TELEGRAM_CHANNELS_LEGACY: List[str] = []
 
@@ -85,6 +68,9 @@ class Settings(BaseSettings):
 
     POST_FETCH_LIMIT: int = 25
     COMMENT_FETCH_LIMIT: int = 200
+    # --- НАЧАЛО: Добавлена новая настройка ---
+    AI_ANALYSIS_BATCH_SIZE: int = 100 # Размер пачки для постановки комментариев на AI-анализ
+    # --- КОНЕЦ: Добавлена новая настройка ---
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'),
@@ -102,4 +88,5 @@ settings = Settings()
 #    print(f"DATABASE_URL_FOR_ALEMBIC: {settings.DATABASE_URL_FOR_ALEMBIC}")
 # print(f"OPENAI_API_KEY is set: {'Yes' if settings.OPENAI_API_KEY else 'No'}")
 # print(f"OPENAI_DEFAULT_MODEL_FOR_TASKS: {settings.OPENAI_DEFAULT_MODEL_FOR_TASKS}")
+# print(f"AI_ANALYSIS_BATCH_SIZE: {settings.AI_ANALYSIS_BATCH_SIZE}") # <--- Можно добавить для отладки
 # print(f"--- End Config Loaded ---")

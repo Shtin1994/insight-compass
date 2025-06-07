@@ -36,27 +36,67 @@ except ImportError:
         logger.error("ЗАГЛУШКА: llm_service не найден или функция одиночный_запрос_к_llm отсутствует.")
         return "Заглушка: Ошибка вызова LLM сервиса."
 
+# Импорт Celery задач
+try:
+    from app.tasks import ( # Сгруппировал импорты для читаемости
+        collect_telegram_data_task, 
+        summarize_top_posts_task, 
+        send_daily_digest_task, 
+        analyze_posts_sentiment_task, 
+        enqueue_comments_for_ai_feature_analysis_task,
+        advanced_data_refresh_task # <--- НОВЫЙ ИМПОРТ ЗАДАЧИ
+    )
+except ImportError as e:
+    logging.getLogger(__name__).error(f"Ошибка импорта задач Celery: {e}")
+    # Заглушки для всех задач, чтобы приложение могло запуститься
+    def collect_telegram_data_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_collect'})()
+    def summarize_top_posts_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_summarize'})()
+    def send_daily_digest_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_digest'})()
+    def analyze_posts_sentiment_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_sentiment'})()
+    def enqueue_comments_for_ai_feature_analysis_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_comment_ai'})()
+    def advanced_data_refresh_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_advanced_refresh'})()
+
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-endpoint_logger = logging.getLogger("api_endpoints")
+logger = logging.getLogger(__name__) # Используем стандартный логгер для модуля
+endpoint_logger = logging.getLogger("api_endpoints") # Отдельный логгер для эндпоинтов
 endpoint_logger.setLevel(logging.INFO)
-if not endpoint_logger.handlers and not logging.getLogger().handlers:
-    _handler = logging.StreamHandler()
-    _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    _handler.setFormatter(_formatter)
-    endpoint_logger.addHandler(_handler)
+
+# Проверка и настройка обработчиков для endpoint_logger, чтобы избежать дублирования
+if not endpoint_logger.handlers and not logging.getLogger().handlers: # Эта проверка может быть слишком строгой
+    # Более простой вариант: всегда добавлять, если нет своих обработчиков
+    if not endpoint_logger.hasHandlers():
+        _handler = logging.StreamHandler()
+        _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        _handler.setFormatter(_formatter)
+        endpoint_logger.addHandler(_handler)
+        endpoint_logger.propagate = False # Предотвращаем передачу логов корневому логгеру, если у нас свой обработчик
 
 telegram_client_instance: Optional[TelegramClient] = None
 async def get_telegram_client() -> TelegramClient:
     global telegram_client_instance
     if telegram_client_instance is None or not telegram_client_instance.is_connected():
-        raise HTTPException(status_code=503, detail="Telegram client not available.")
+        # Попытка переподключения, если клиент не None, но отсоединен
+        if telegram_client_instance is not None and not telegram_client_instance.is_connected():
+            logger.warning("Telegram client was disconnected. Attempting to reconnect for request...")
+            try:
+                await telegram_client_instance.connect()
+                if not await telegram_client_instance.is_user_authorized():
+                    logger.error("API: Reconnection attempt failed - user not authorized.")
+                    raise HTTPException(status_code=503, detail="Telegram client not authorized after reconnect attempt.")
+                logger.info("API: Successfully reconnected to Telegram for request.")
+            except Exception as e:
+                logger.error(f"API: Failed to reconnect Telegram client during request: {e}", exc_info=True)
+                raise HTTPException(status_code=503, detail=f"Telegram client reconnection failed: {e}")
+        else: # telegram_client_instance is None
+            logger.error("Telegram client is None. Startup might have failed.")
+            raise HTTPException(status_code=503, detail="Telegram client not available. Startup may have failed.")
     return telegram_client_instance
 
 app = FastAPI(title=settings.PROJECT_NAME, version="0.1.0")
 app.add_middleware(
     CORSMiddleware, 
-    allow_origins=["*"], 
+    allow_origins=["*"], # В продакшене лучше указать конкретные домены
     allow_credentials=True, 
     allow_methods=["*"], 
     allow_headers=["*"]
@@ -66,22 +106,28 @@ app.add_middleware(
 async def startup_event():
     global telegram_client_instance
     if not all([settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH, settings.TELEGRAM_PHONE_NUMBER_FOR_LOGIN]):
-        logger.error("Telegram API credentials not configured.")
+        logger.error("Telegram API credentials not configured. Telegram client will not be initialized.")
+        telegram_client_instance = None # Явно устанавливаем в None
         return
-    session_file_path = "/app/api_telegram_session"
+    
+    session_file_path = "/app/api_telegram_session" # Убедитесь, что эта папка существует и доступна для записи
     logger.info(f"API using session: {session_file_path}.session")
+    
+    # Инициализация клиента здесь
     telegram_client_instance = TelegramClient(session_file_path, settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH)
+    
     try:
         logger.info("API: Connecting to Telegram...")
         await telegram_client_instance.connect()
         if not await telegram_client_instance.is_user_authorized():
-            logger.error(f"API: User NOT authorized for session {session_file_path}.session.")
+            logger.error(f"API: User NOT authorized for session {session_file_path}.session. Client initialized but not usable.")
+            # Не устанавливаем telegram_client_instance в None, чтобы get_telegram_client мог попытаться переподключиться
         else:
             me = await telegram_client_instance.get_me()
-            logger.info(f"API: Connected as {me.first_name} (@{me.username or ''})")
+            logger.info(f"API: Connected to Telegram as {me.first_name} (@{me.username or ''})")
     except Exception as e:
-        logger.error(f"API: Failed to connect/authorize: {e}", exc_info=True)
-        telegram_client_instance = None
+        logger.error(f"API: Failed to connect/authorize Telegram client during startup: {e}", exc_info=True)
+        telegram_client_instance = None # В случае ошибки при запуске, делаем его None
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -89,6 +135,12 @@ async def shutdown_event():
     if telegram_client_instance and telegram_client_instance.is_connected():
         logger.info("Disconnecting Telegram client...")
         await telegram_client_instance.disconnect()
+        logger.info("Telegram client disconnected.")
+    elif telegram_client_instance:
+        logger.info("Telegram client was initialized but not connected. No action needed for disconnection.")
+    else:
+        logger.info("Telegram client was not initialized. No action needed for disconnection.")
+
 
 api_v1_router = APIRouter(prefix=settings.API_V1_STR)
 
@@ -299,9 +351,10 @@ async def get_insight_item_trend(
         date_group_expression_col = cast(models_module.Comment.commented_at, SQLDate).label("trend_date_label")
         date_format_str = "%Y-%m-%d"
     elif granularity == ui_schemas.TrendGranularity.WEEK:
-        date_group_expression_col = func.to_char(models_module.Comment.commented_at, 'YYYY-WW').label("trend_date_label")
-        date_format_str = "YYYY-WW" 
+        date_group_expression_col = func.to_char(models_module.Comment.commented_at, 'YYYY-WW').label("trend_date_label") # Используем 'YYYY-WW' для недели
+        date_format_str = "YYYY-WW" # Соответствующий формат для ключа
     else: raise HTTPException(status_code=400, detail="Invalid granularity specified.")
+    
     extracted_element_alias = func.jsonb_array_elements_text(comment_jsonb_field).alias("extracted_insight_element")
     stmt = (
         select(date_group_expression_col, func.count(models_module.Comment.id).label("item_count"))
@@ -317,8 +370,9 @@ async def get_insight_item_trend(
     results = await db.execute(stmt)
     existing_data_map: Dict[str, int] = {str(row.trend_date_label): row.item_count for row in results.all()}
     trend_data_points: List[ui_schemas.InsightTrendDataPoint] = []
-    current_iter_date = query_start_date
+    
     if granularity == ui_schemas.TrendGranularity.DAY:
+        current_iter_date = query_start_date
         while current_iter_date <= today:
             date_key = current_iter_date.strftime(date_format_str)
             trend_data_points.append(ui_schemas.InsightTrendDataPoint(date=date_key, count=existing_data_map.get(date_key, 0)))
@@ -326,11 +380,12 @@ async def get_insight_item_trend(
     elif granularity == ui_schemas.TrendGranularity.WEEK:
         all_week_keys_in_period = set()
         temp_date = query_start_date
-        while temp_date <= today:
-            all_week_keys_in_period.add(temp_date.strftime(date_format_str))
+        while temp_date <= today: # Итерируемся по дням, чтобы получить все недели в периоде
+            all_week_keys_in_period.add(temp_date.strftime(date_format_str)) # PostgreSQL to_char 'YYYY-WW'
             temp_date += timedelta(days=1) 
-        for week_key in sorted(list(all_week_keys_in_period)):
+        for week_key in sorted(list(all_week_keys_in_period)): # Сортируем недели
             trend_data_points.append(ui_schemas.InsightTrendDataPoint(date=week_key, count=existing_data_map.get(week_key,0)))
+            
     return ui_schemas.InsightItemTrendResponse(item_type=item_type, item_text=item_text, period_days=days_period, granularity=granularity, trend_data=trend_data_points)
 
 # --- ЭНДПОИНТ ДЛЯ ВОПРОСОВ НА ЕСТЕСТВЕННОМ ЯЗЫКЕ ---
@@ -513,28 +568,75 @@ async def get_comments_for_post_ui(post_id: int, skip: int = Query(0, ge=0), lim
         if hasattr(e, 'errors') and callable(e.errors): endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
         raise HTTPException(status_code=500, detail=f"Internal server error while fetching comments for post {post_id}")
 
+# --- Эндпоинты для запуска Celery задач ---
 @api_v1_router.post("/run-collection-task/", summary="Запустить задачу сбора данных")
 async def run_collection_task_endpoint(): 
-    from app.tasks import collect_telegram_data_task 
-    collect_telegram_data_task.delay(); return {"message": "Задача сбора данных запущена."}
+    task = collect_telegram_data_task.delay()
+    return {"message": "Задача сбора данных запущена.", "task_id": task.id}
+
 @api_v1_router.post("/run-summarization-task/", summary="Запустить задачу суммаризации")
 async def run_summarization_task_endpoint(): 
-    from app.tasks import summarize_top_posts_task 
-    summarize_top_posts_task.delay(); return {"message": "Задача суммаризации запущена."}
+    task = summarize_top_posts_task.delay()
+    return {"message": "Задача суммаризации запущена.", "task_id": task.id}
+
 @api_v1_router.post("/run-daily-digest-task/", summary="Запустить задачу дайджеста")
 async def run_daily_digest_task_endpoint(): 
-    from app.tasks import send_daily_digest_task 
-    send_daily_digest_task.delay(); return {"message": "Задача дайджеста запущена."}
+    task = send_daily_digest_task.delay()
+    return {"message": "Задача дайджеста запущена.", "task_id": task.id}
+
 @api_v1_router.post("/run-sentiment-analysis-task/", summary="Запустить задачу анализа тональности")
 async def run_sentiment_analysis_task_endpoint(): 
-    from app.tasks import analyze_posts_sentiment_task 
-    analyze_posts_sentiment_task.delay(limit_posts_to_analyze=settings.POST_FETCH_LIMIT or 5); return {"message": "Задача анализа тональности запущена."}
+    task = analyze_posts_sentiment_task.delay(limit_posts_to_analyze=settings.POST_FETCH_LIMIT or 5)
+    return {"message": "Задача анализа тональности запущена.", "task_id": task.id}
+
 @api_v1_router.post("/run-comment-feature-analysis/", summary="Запустить AI-анализ фич комментариев")
-async def run_comment_feature_analysis_endpoint(limit: int = Query(10, ge=1, le=500, description="Количество комментариев для постановки в очередь на анализ")):
-    from app.tasks import enqueue_comments_for_ai_feature_analysis_task 
+async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le=1000, description="Количество комментариев для постановки в очередь на анализ")): # Увеличил дефолт и макс лимит
     endpoint_logger.info(f"POST /run-comment-feature-analysis/ - limit={limit}")
-    enqueue_comments_for_ai_feature_analysis_task.delay(limit_comments_to_queue=limit); return {"message": f"Задача AI-анализа фич для ~{limit} комментариев запущена."}
+    task = enqueue_comments_for_ai_feature_analysis_task.delay(limit_comments_to_queue=limit)
+    return {"message": f"Задача AI-анализа фич для ~{limit} комментариев запущена.", "task_id": task.id}
+
+# --- НОВЫЙ ЭНДПОИНТ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
+@api_v1_router.post(
+    "/run-advanced-data-refresh/", 
+    response_model=ui_schemas.AdvancedDataRefreshResponse,
+    summary="Запустить задачу продвинутого обновления данных",
+    description="Запускает комплексную задачу сбора и обновления данных постов и комментариев с различными параметрами, с последующим AI-анализом новых комментариев."
+)
+async def run_advanced_data_refresh_endpoint(
+    refresh_request: ui_schemas.AdvancedDataRefreshRequest,
+    # BackgroundTasks здесь не нужен, так как задача Celery асинхронна сама по себе
+):
+    endpoint_logger.info(f"POST /run-advanced-data-refresh/ - params: {refresh_request.model_dump(exclude_none=True)}")
+    
+    try:
+        task = advanced_data_refresh_task.delay(
+            channel_ids=refresh_request.channel_ids,
+            post_refresh_mode_str=refresh_request.post_refresh_mode.value,
+            post_refresh_days=refresh_request.post_refresh_days,
+            post_refresh_start_date_iso=refresh_request.post_refresh_start_date_str, 
+            post_limit_per_channel=refresh_request.post_limit_per_channel,
+            update_existing_posts_info=refresh_request.update_existing_posts_info,
+            comment_refresh_mode_str=refresh_request.comment_refresh_mode.value,
+            comment_limit_per_post=refresh_request.comment_limit_per_post,
+            analyze_new_comments=refresh_request.analyze_new_comments
+        )
+        
+        endpoint_logger.info(f"Advanced data refresh task '{task.id}' enqueued.")
+        
+        return ui_schemas.AdvancedDataRefreshResponse(
+            message="Задача продвинутого обновления данных успешно поставлена в очередь.",
+            task_id=task.id,
+            details=refresh_request.model_dump(exclude_none=True) # exclude_none=True, чтобы не передавать None значения в 'details'
+        )
+    except Exception as e:
+        endpoint_logger.error(f"Ошибка при постановке задачи advanced_data_refresh_task в очередь: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Не удалось запустить задачу продвинутого обновления: {str(e)}"
+        )
 
 app.include_router(api_v1_router)
+
 @app.get("/")
-async def root(): return {"message": f"Welcome to {settings.PROJECT_NAME} API"}
+async def root(): 
+    return {"message": f"Welcome to {settings.PROJECT_NAME} API. Version: 0.1.0"}

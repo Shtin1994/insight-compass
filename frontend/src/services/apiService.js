@@ -165,7 +165,6 @@ export const fetchInsightItemTrendAPI = async (itemType, itemText, daysPeriod = 
   return fetchData(url);
 };
 
-// --- НАЧАЛО: Новая функция для запросов на естественном языке ---
 /**
  * Отправляет запрос пользователя на естественном языке на бэкенд.
  * @param {string} queryText - Текст вопроса пользователя.
@@ -183,11 +182,69 @@ export const postNLQueryAPI = async (queryText, contextParams = {}) => {
     ...contextParams // Добавляем опциональные параметры контекста, если они есть
   };
 
-  const url = `${API_BASE_URL}/natural_language_query/`; // Убедитесь, что путь правильный
+  const url = `${API_BASE_URL}/natural_language_query/`; 
   return fetchData(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
 };
-// --- КОНЕЦ: Новая функция ---
+
+// --- НАЧАЛО: НОВАЯ ФУНКЦИЯ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
+/**
+ * Запускает задачу продвинутого обновления данных на бэкенде.
+ * @param {object} refreshParams - Объект с параметрами для обновления, 
+ *                                 соответствующий схеме AdvancedDataRefreshRequest на бэкенде.
+ * @returns {Promise<object>} - Ответ от API, обычно содержащий task_id.
+ */
+export const runAdvancedDataRefreshAPI = async (refreshParams) => {
+  const url = `${API_BASE_URL}/run-advanced-data-refresh/`;
+  return fetchData(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(refreshParams),
+  });
+};
+// --- КОНЕЦ: НОВАЯ ФУНКЦИЯ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
+
+// --- Функции для запуска других Celery задач (если они еще не были добавлены) ---
+/**
+ * Запускает задачу сбора данных.
+ */
+export const runCollectionTaskAPI = async () => {
+  const url = `${API_BASE_URL}/run-collection-task/`;
+  return fetchData(url, { method: 'POST' });
+};
+
+/**
+ * Запускает задачу суммаризации постов.
+ */
+export const runSummarizationTaskAPI = async () => {
+  const url = `${API_BASE_URL}/run-summarization-task/`;
+  return fetchData(url, { method: 'POST' });
+};
+
+/**
+ * Запускает задачу отправки дайджеста.
+ */
+export const runDailyDigestTaskAPI = async () => {
+  const url = `${API_BASE_URL}/run-daily-digest-task/`;
+  return fetchData(url, { method: 'POST' });
+};
+
+/**
+ * Запускает задачу анализа тональности постов.
+ */
+export const runSentimentAnalysisTaskAPI = async () => {
+  const url = `${API_BASE_URL}/run-sentiment-analysis-task/`;
+  return fetchData(url, { method: 'POST' });
+};
+
+/**
+ * Запускает задачу AI-анализа фич комментариев.
+ * @param {number} limit - Количество комментариев для постановки в очередь.
+ */
+export const runCommentFeatureAnalysisAPI = async (limit = 100) => {
+  const url = `${API_BASE_URL}/run-comment-feature-analysis/?limit=${limit}`;
+  return fetchData(url, { method: 'POST' });
+};

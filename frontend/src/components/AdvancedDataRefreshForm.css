@@ -1,0 +1,120 @@
+/* frontend/src/components/AdvancedDataRefreshForm.css */
+.advanced-refresh-form-container {
+  background-color: #f9f9f9;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  max-width: 700px;
+  margin: 20px auto;
+}
+
+.advanced-refresh-form-container h3 {
+  text-align: center;
+  margin-bottom: 20px;
+  color: #333;
+}
+
+.form-section {
+  margin-bottom: 25px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #eee;
+}
+
+.form-section:last-child {
+  border-bottom: none;
+}
+
+.form-section h4 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  color: #555;
+  font-size: 1.1em;
+  border-bottom: 1px dashed #ddd;
+  padding-bottom: 5px;
+}
+
+.advanced-refresh-form-container label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: #444;
+}
+
+.advanced-refresh-form-container input[type="text"],
+.advanced-refresh-form-container input[type="number"],
+.advanced-refresh-form-container input[type="date"],
+.advanced-refresh-form-container select.form-control {
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-sizing: border-box;
+  font-size: 1em;
+}
+
+.advanced-refresh-form-container input[type="checkbox"] {
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.advanced-refresh-form-container input[type="checkbox"] + label {
+  display: inline; /* Чтобы label был на той же строке */
+  font-weight: normal;
+}
+
+
+.advanced-refresh-form-container select[multiple].form-control {
+    height: auto; /* Позволяет multiple select растягиваться */
+    min-height: 100px; /* Минимальная высота для удобства */
+}
+
+.channel-select-buttons {
+    margin-top: 5px;
+    margin-bottom: 10px;
+}
+.channel-select-buttons button {
+    margin-right: 10px;
+    padding: 6px 12px;
+    font-size: 0.9em;
+}
+
+.submit-button {
+  background-color: #007bff;
+  color: white;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1.1em;
+  width: 100%;
+  transition: background-color 0.2s ease-in-out;
+}
+
+.submit-button:hover {
+  background-color: #0056b3;
+}
+
+.submit-button:disabled {
+  background-color: #cccccc;
+  cursor: not-allowed;
+}
+
+.error-message {
+  color: #D8000C;
+  background-color: #FFD2D2;
+  border: 1px solid #D8000C;
+  padding: 10px;
+  margin-bottom: 15px;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.success-message {
+  color: #4F8A10;
+  background-color: #DFF2BF;
+  border: 1px solid #4F8A10;
+  padding: 10px;
+  margin-bottom: 15px;
+  border-radius: 4px;
+  text-align: center;
+}
