@@ -13,8 +13,6 @@ import openai
 from openai import OpenAIError # Убедись, что этот импорт есть, если используется
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker, aliased
 from sqlalchemy.future import select
 from sqlalchemy import desc, func, update, cast, literal_column, nullslast, Integer as SAInteger, or_
 from sqlalchemy.orm import aliased
@@ -819,16 +817,10 @@ def advanced_data_refresh_task(
     comment_limit_per_post: int = settings.COMMENT_FETCH_LIMIT,
     analyze_new_comments: bool = True
 ):
-    task_start_time = time.time()
-    log_prefix = "[AdvancedRefresh]" # Возвращаем оригинальный префикс
+    task_start_time = time.time(); log_prefix = "[AdvancedRefresh]";
+    logger.info(f"{log_prefix} Запущена задача. ID: {self.request.id}. Параметры: channels={channel_ids}, post_mode='{post_refresh_mode_str}', post_days={post_refresh_days}, post_start_date='{post_refresh_start_date_iso}', post_limit={post_limit_per_channel}, update_existing={update_existing_posts_info}, comment_mode='{comment_refresh_mode_str}', comment_limit={comment_limit_per_post}, analyze={analyze_new_comments}")
+    self.update_state(state='PROGRESS', meta={'current_step': 'Инициализация задачи', 'progress': 5})
     
-    logger.info(f"{log_prefix} Запущена задача (с ЛОКАЛЬНЫМ ENGINE). ID: {self.request.id}. Параметры: channels={channel_ids}, post_mode='{post_refresh_mode_str}', post_days={post_refresh_days}, post_start_date='{post_refresh_start_date_iso}', post_limit={post_limit_per_channel}, update_existing={update_existing_posts_info}, comment_mode='{comment_refresh_mode_str}', comment_limit={comment_limit_per_post}, analyze={analyze_new_comments}")
-    
-    self.update_state(state='PROGRESS', meta={'current_step': 'Инициализация задачи (Локальный Engine)', 'progress': 5})
-    
-    # Эти переменные будут использоваться внутри _async_advanced_refresh_logic
-    # и должны быть доступны там через замыкание или переданы как аргументы.
-    # Для простоты, мы их определим здесь, и они будут доступны в замыкании.
     post_refresh_mode_enum: PostRefreshMode
     comment_refresh_mode_enum: CommentRefreshMode
     post_refresh_start_date: Optional[datetime] = None
@@ -845,58 +837,31 @@ def advanced_data_refresh_task(
         self.update_state(state='FAILURE', meta={'current_step': 'Ошибка параметров задачи', 'progress': 100, 'error': str(e)})
         return f"Ошибка параметров задачи: {e}"
     
-    api_id_val = settings.TELEGRAM_API_ID
-    api_hash_val = settings.TELEGRAM_API_HASH
+    api_id_val = settings.TELEGRAM_API_ID; api_hash_val = settings.TELEGRAM_API_HASH; phone_number_val = settings.TELEGRAM_PHONE_NUMBER_FOR_LOGIN
+    if not all([api_id_val, api_hash_val, phone_number_val]):
+        logger.error(f"{log_prefix} Ошибка: Telegram API credentials не настроены.")
+        self.update_state(state='FAILURE', meta={'current_step': 'Ошибка конфигурации Telegram API', 'progress': 100, 'error': 'Credentials not configured'})
+        return "Config error: Telegram API credentials"
     session_file_path = "/app/celery_telegram_session"
 
-    if not all([api_id_val, api_hash_val]): 
-        logger.error(f"{log_prefix} Ошибка: Telegram API ID/Hash не настроены.")
-        self.update_state(state='FAILURE', meta={'current_step': 'Ошибка конфигурации Telegram API', 'progress': 100, 'error': 'Credentials (ID/Hash) not configured'})
-        return "Config error: Telegram API ID/Hash"
-
     async def _async_advanced_refresh_logic():
-        # Nonlocal переменные из внешней функции теперь доступны здесь через замыкание
-        # nonlocal post_refresh_mode_enum, comment_refresh_mode_enum, post_refresh_start_date
-        # nonlocal channel_ids, post_limit_per_channel, update_existing_posts_info, comment_limit_per_post, analyze_new_comments
-        # nonlocal api_id_val, api_hash_val, session_file_path, self, log_prefix # log_prefix из внешней функции
-
-        tg_client = None
-        local_engine = None # Для корректного закрытия в finally
-        processed_channels_count = 0
-        total_new_posts = 0
-        total_updated_posts_info = 0
-        total_new_comments_collected = 0
+        tg_client = None; processed_channels_count = 0; total_new_posts = 0; total_updated_posts_info = 0; total_new_comments_collected = 0
         newly_added_or_updated_comment_ids_inner: List[int] = []
-        
         try:
-            # --- Создаем engine и session factory ЛОКАЛЬНО для этой задачи ---
-            ASYNC_DB_URL = settings.DATABASE_URL 
-            if not ASYNC_DB_URL.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL = ASYNC_DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
-            logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
-            # --- Конец локального создания ---
-
-            async with LocalAsyncSessionFactory() as db: # Используем ЛОКАЛЬНУЮ фабрику сессий
+            async with get_async_session_context_manager() as db:
                 logger.info(f"{log_prefix} Создание TGClient: {session_file_path}")
                 tg_client = TelegramClient(session_file_path, api_id_val, api_hash_val)
                 self.update_state(state='PROGRESS', meta={'current_step': 'Подключение к Telegram', 'progress': 10})
                 await tg_client.connect()
                 if not await tg_client.is_user_authorized():
-                    # Обновляем статус задачи перед выбросом исключения
-                    self.update_state(state='FAILURE', meta={'current_step': 'Ошибка авторизации Telegram', 'error': 'TG Client not authorized'})
                     raise ConnectionRefusedError(f"Celery: Пользователь не авторизован для {session_file_path}.session")
                 me = await tg_client.get_me()
-                logger.info(f"{log_prefix} TGClient подключен как: {me.first_name if me else 'N/A'}")
+                logger.info(f"{log_prefix} TGClient подключен как: {me.first_name}")
                 
                 channels_to_process_q = select(Channel).where(Channel.is_active == True)
                 if channel_ids is not None:
-                    if not any(channel_ids): 
-                        logger.info(f"{log_prefix} Передан пустой список ID каналов.")
+                    if not any(channel_ids): # Проверка на пустой список
+                        logger.info(f"{log_prefix} Передан пустой список ID каналов. Обработка всех активных каналов не будет выполнена, если это не предполагалось.")
                         self.update_state(state='SUCCESS', meta={'current_step': 'Завершено (пустой список ID каналов)', 'progress': 100, 'result_summary': 'Пустой список ID каналов для обработки.'})
                         return "Пустой список ID каналов для обработки."
                     channels_to_process_q = channels_to_process_q.where(Channel.id.in_(channel_ids))
@@ -905,7 +870,7 @@ def advanced_data_refresh_task(
                 channels_db_list: List[Channel] = channels_result.scalars().all()
 
                 if not channels_db_list:
-                    logger.info(f"{log_prefix} Нет каналов для обработки.")
+                    logger.info(f"{log_prefix} Нет каналов для обработки (возможно, выбранные ID неактивны или не существуют).")
                     self.update_state(state='SUCCESS', meta={'current_step': 'Завершено (нет каналов для обработки)', 'progress': 100, 'result_summary': 'Нет каналов для обработки.'})
                     return "Нет каналов для обработки."
                 
@@ -915,7 +880,7 @@ def advanced_data_refresh_task(
 
                 for idx, channel_db in enumerate(channels_db_list):
                     processed_channels_count += 1
-                    channel_progress = base_progress + int(((idx + 1) / total_channels_to_process) * 70) 
+                    channel_progress = base_progress + int(((idx + 1) / total_channels_to_process) * 70) # 70% на сбор данных
                     self.update_state(state='PROGRESS', meta={'current_step': f'Канал: {channel_db.title} ({idx+1}/{total_channels_to_process})', 'progress': channel_progress, 'channel_id': channel_db.id, 'channel_title': channel_db.title})
                     logger.info(f"{log_prefix} Обработка канала: '{channel_db.title}' (ID: {channel_db.id})")
                     
@@ -923,92 +888,88 @@ def advanced_data_refresh_task(
                         tg_channel_entity = await tg_client.get_entity(channel_db.id)
                         iter_params: Dict[str, Any] = {"entity": tg_channel_entity, "limit": None}
                         
-                        current_posts_for_comment_scan: List[Post] = []
-                        current_newly_created_posts: List[Post] = []
-                        current_new_p_ch: int = 0
-                        current_upd_p_ch: int = 0
-                        current_last_id_tg: int = channel_db.last_processed_post_id or 0
-
+                        # --- ИЗМЕНЕНИЕ 2: Использование post_refresh_mode_enum ---
                         if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY:
                             iter_params["limit"] = post_limit_per_channel
                             if channel_db.last_processed_post_id:
                                 iter_params["min_id"] = channel_db.last_processed_post_id
-                            current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
                         elif post_refresh_mode_enum == PostRefreshMode.LAST_N_DAYS and post_refresh_days:
                             iter_params["offset_date"] = datetime.now(timezone.utc) - timedelta(days=post_refresh_days)
                             iter_params["reverse"] = True
                             iter_params["limit"] = post_limit_per_channel
-                            current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
                         elif post_refresh_mode_enum == PostRefreshMode.SINCE_DATE and post_refresh_start_date:
                             iter_params["offset_date"] = post_refresh_start_date
                             iter_params["reverse"] = True
                             iter_params["limit"] = post_limit_per_channel
-                            current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
-                        # Добавь сюда ветку для PostRefreshMode.UPDATE_STATS_ONLY, если будешь реализовывать Кнопку 2
+                        # --- КОНЕЦ ИЗМЕНЕНИЯ 2 ---
+
+                        posts_for_comment_scan, newly_created_posts, new_p_ch, upd_p_ch, last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
+                        total_new_posts += new_p_ch; total_updated_posts_info += upd_p_ch
                         
-                        total_new_posts += current_new_p_ch
-                        total_updated_posts_info += current_upd_p_ch
-                        
-                        if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY and current_last_id_tg > (channel_db.last_processed_post_id or 0):
-                            channel_db.last_processed_post_id = current_last_id_tg
+                        if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY and last_id_tg > (channel_db.last_processed_post_id or 0):
+                            channel_db.last_processed_post_id = last_id_tg
                             db.add(channel_db)
 
+                        # --- ИЗМЕНЕНИЕ 3: Пропуск сбора комментариев ---
                         if comment_refresh_mode_enum != CommentRefreshMode.DO_NOT_REFRESH:
-                            channel_specific_comments_collected = 0
-                            channel_specific_new_comment_ids: List[int] = []
+                            current_channel_comments = 0
+                            current_channel_new_comment_ids: List[int] = []
                             
-                            # posts_for_comment_scan должна быть определена из блока if/elif выше
-                            if current_posts_for_comment_scan: 
-                                posts_to_scan_for_comments: List[Post] = []
+                            if posts_for_comment_scan: # Этот if здесь важен
+                                posts_for_actual_comment_scan: List[Post] = []
                                 if comment_refresh_mode_enum == CommentRefreshMode.NEW_POSTS_ONLY:
-                                    posts_to_scan_for_comments = current_newly_created_posts
-                                else: # ADD_NEW_TO_EXISTING
-                                    posts_to_scan_for_comments = current_posts_for_comment_scan
+                                    posts_for_actual_comment_scan = newly_created_posts
+                                else: # Подразумевается ADD_NEW_TO_EXISTING
+                                    posts_for_actual_comment_scan = posts_for_comment_scan
 
-                                if posts_to_scan_for_comments:
-                                    logger.info(f"{log_prefix}  Сбор комм. для {len(posts_to_scan_for_comments)} постов канала {channel_db.id} (режим: {comment_refresh_mode_enum.value})...")
-                                    for post_obj in posts_to_scan_for_comments:
+                                if posts_for_actual_comment_scan:
+                                    logger.info(f"{log_prefix}  Сбор комм. для {len(posts_for_actual_comment_scan)} постов канала {channel_db.id} (режим: {comment_refresh_mode_enum.value})...")
+                                    for post_obj in posts_for_actual_comment_scan:
                                         num_c, new_c_ids = await _helper_fetch_and_process_comments_for_post(tg_client, db, post_obj, tg_channel_entity, comment_limit_per_post, log_prefix)
-                                        channel_specific_comments_collected += num_c
-                                        channel_specific_new_comment_ids.extend(new_c_ids)
+                                        current_channel_comments += num_c
+                                        current_channel_new_comment_ids.extend(new_c_ids)
                                 else:
                                     logger.info(f"{log_prefix}  Нет подходящих постов для сбора комментариев в канале {channel_db.id} для режима {comment_refresh_mode_enum.value}.")
                                     
-                            total_new_comments_collected += channel_specific_comments_collected
-                            newly_added_or_updated_comment_ids_inner.extend(channel_specific_new_comment_ids)
+                            total_new_comments_collected += current_channel_comments
+                            newly_added_or_updated_comment_ids_inner.extend(current_channel_new_comment_ids)
                         else:
                             logger.info(f"{log_prefix}  Сбор комментариев пропущен для канала {channel_db.id} (режим: {comment_refresh_mode_enum.value}).")
+                        # --- КОНЕЦ ИЗМЕНЕНИЯ 3 ---
                             
                     except (ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError) as e_ch_access:
-                        logger.warning(f"{log_prefix}  Канал {channel_db.id} ('{channel_db.title if channel_db else 'N/A'}') недоступен: {e_ch_access}. Деактивируем, если объект channel_db есть.")
-                        if channel_db: channel_db.is_active = False; db.add(channel_db)
-                        continue 
+                        logger.warning(f"{log_prefix}  Канал {channel_db.id} ('{channel_db.title}') недоступен: {e_ch_access}. Деактивируем.")
+                        channel_db.is_active = False; db.add(channel_db) # Помечаем неактивным в сессии
+                        continue # Переходим к следующему каналу
                     except FloodWaitError as fwe_ch:
-                        logger.warning(f"{log_prefix}  FloodWait ({fwe_ch.seconds} сек.) для канала {channel_db.title if channel_db else 'N/A'}. Пропускаем канал в этом запуске.")
-                        await asyncio.sleep(fwe_ch.seconds + 10) 
+                        logger.warning(f"{log_prefix}  FloodWait ({fwe_ch.seconds} сек.) для канала {channel_db.title}. Пропускаем канал в этом запуске.")
+                        # Можно добавить логику ожидания и повторной попытки для этого канала позже, или просто пропустить
+                        await asyncio.sleep(fwe_ch.seconds + 10) # Даем время Telegram "остыть"
                         continue
                     except Exception as e_ch_proc:
-                        logger.error(f"{log_prefix}  Ошибка обработки канала '{channel_db.title if channel_db else 'N/A'}': {type(e_ch_proc).__name__} - {e_ch_proc}", exc_info=True)
-                        continue 
+                        logger.error(f"{log_prefix}  Ошибка обработки канала '{channel_db.title}': {type(e_ch_proc).__name__} - {e_ch_proc}", exc_info=True)
+                        continue # Переходим к следующему каналу
                     
-                    if idx < total_channels_to_process - 1: 
+                    if idx < total_channels_to_process - 1: # Если это не последний канал
                         logger.debug(f"{log_prefix} Пауза 1 сек перед обработкой следующего канала.")
-                        await asyncio.sleep(1) 
+                        await asyncio.sleep(1) # Небольшая пауза между каналами
                 
-                await db.commit() 
+                await db.commit() # Коммитим изменения после обработки всех каналов
                 
                 final_summary = f"Обновление завершено. Каналов обработано: {processed_channels_count}, Новых постов: {total_new_posts}, Обновлено инфо о постах: {total_updated_posts_info}, Новых комментариев собрано: {total_new_comments_collected}."
                 logger.info(f"{log_prefix} {final_summary}")
                 
+                # Обновляем состояние перед AI-анализом
                 current_meta = {'current_step': 'Данные собраны, подготовка к AI-анализу', 'progress': 85, 'summary_so_far': final_summary}
                 self.update_state(state='PROGRESS', meta=current_meta)
 
                 if analyze_new_comments and newly_added_or_updated_comment_ids_inner:
                     unique_comment_ids = sorted(list(set(newly_added_or_updated_comment_ids_inner)))
                     logger.info(f"{log_prefix} Запуск AI-анализа для {len(unique_comment_ids)} новых/обновленных комментариев.")
+                    # Ставим задачу в очередь Celery
                     enqueue_comments_for_ai_feature_analysis_task.delay(
                         comment_ids_to_process=unique_comment_ids, 
-                        limit_comments_to_queue=settings.AI_ANALYSIS_BATCH_SIZE 
+                        limit_comments_to_queue=settings.AI_ANALYSIS_BATCH_SIZE # Используем лимит из настроек
                     )
                     current_meta['current_step'] = f'AI-анализ для {len(unique_comment_ids)} комментариев поставлен в очередь'
                     current_meta['progress'] = 95
@@ -1021,51 +982,45 @@ def advanced_data_refresh_task(
                 
                 self.update_state(state='SUCCESS', meta={'current_step': 'Завершено успешно!', 'progress': 100, 'result_summary': final_summary})
                 return final_summary
-        except ConnectionRefusedError as e_auth_tg: # Эта ошибка теперь может быть выброшена из _async_advanced_refresh_logic
+        except ConnectionRefusedError as e_auth_tg:
             logger.error(f"{log_prefix} ОШИБКА АВТОРИЗАЦИИ TELETHON: {e_auth_tg}", exc_info=True)
-            # Статус уже должен быть установлен внутри _async_advanced_refresh_logic
-            raise 
+            self.update_state(state='FAILURE', meta={'current_step': 'Ошибка авторизации Telegram', 'progress': 100, 'error': str(e_auth_tg)})
+            raise # Перевыбрасываем, чтобы Celery обработал как ошибку
         except Exception as e_main_refresh:
             logger.error(f"{log_prefix} КРИТИЧЕСКАЯ ОШИБКА в _async_advanced_refresh_logic: {type(e_main_refresh).__name__} - {e_main_refresh}", exc_info=True)
-            self.update_state(state='FAILURE', meta={'current_step': f'Критическая ошибка: {type(e_main_refresh).__name__}', 'error': str(e_main_refresh)})
-            raise 
+            self.update_state(state='FAILURE', meta={'current_step': f'Критическая ошибка: {type(e_main_refresh).__name__}', 'progress': 100, 'error': str(e_main_refresh)})
+            raise # Перевыбрасываем
         finally:
             if tg_client and tg_client.is_connected():
-                logger.info(f"{log_prefix} Отключение Telegram клиента в finally.")
-                try:
-                    await tg_client.disconnect()
-                except Exception as e_disconnect: # Ловим возможные ошибки при отключении
-                    logger.error(f"{log_prefix} Ошибка при отключении tg_client: {e_disconnect}", exc_info=True)
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
-                await local_engine.dispose()
-    # --- Конец функции _async_advanced_refresh_logic ---
-
+                logger.info(f"{log_prefix} Отключение Telegram клиента...")
+                await tg_client.disconnect()
     try:
         result_message = asyncio.run(_async_advanced_refresh_logic())
         task_duration = time.time() - task_start_time
-        # Лог об успешном завершении уже есть в _async_advanced_refresh_logic, если она дошла до конца
-        # logger.info(f"{log_prefix_main_task} Celery таск '{self.name}' (с ЛОКАЛЬНЫМ ENGINE) УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
+        logger.info(f"Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
+        # Не нужно здесь вызывать self.update_state, так как _async_advanced_refresh_logic это уже делает
         return result_message
-    except Exception as e_task_level: 
+    except Exception as e_task_level: # Ловим исключения, перевыброшенные из _async_advanced_refresh_logic или возникшие в asyncio.run
         task_duration = time.time() - task_start_time
-        logger.error(f"!!! Celery: ОШИБКА УРОВНЯ ЗАДАЧИ в '{self.name}' (с ЛОКАЛЬНЫМ ENGINE) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
+        logger.error(f"!!! Celery: ОШИБКА УРОВНЯ ЗАДАЧИ в '{self.name}' (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
+        # Обновляем состояние на FAILURE, если оно еще не FAILURE
+        if self.AsyncResult(self.request.id).state != 'FAILURE': # Проверяем состояние, чтобы не перезаписать более специфичную ошибку
+             self.update_state(state='FAILURE', meta={'current_step': f'Ошибка выполнения задачи: {type(e_task_level).__name__}', 'progress': 100, 'error': str(e_task_level)})
         
-        # Статус FAILURE уже должен быть установлен внутри _async_advanced_refresh_logic или при ошибке авторизации
-        # Здесь просто обрабатываем ретраи
-        if isinstance(e_task_level, ConnectionRefusedError): 
+        if isinstance(e_task_level, ConnectionRefusedError): # Не ретраим ошибки авторизации
             logger.warning(f"Celery: НЕ БУДЕТ ПОВТОРА для {self.request.id} из-за ошибки авторизации.")
-            raise e_task_level 
+            raise e_task_level # Просто перевыбрасываем, чтобы Celery отметил задачу как FAILED
         
+        # Логика ретраев для других ошибок
         try:
             if self.request.retries < self.max_retries:
                 default_retry_delay_val = self.default_retry_delay if isinstance(self.default_retry_delay, (int, float)) else 600
                 countdown = int(default_retry_delay_val * (2 ** self.request.retries))
-                logger.info(f"Celery: Retry ({self.request.retries + 1}/{self.max_retries}) таска {self.request.id} (с ЛОКАЛЬНЫМ ENGINE) через {countdown} сек из-за: {type(e_task_level).__name__}")
-                raise self.retry(exc=e_task_level, countdown=countdown)
+                logger.info(f"Celery: Retry ({self.request.retries + 1}/{self.max_retries}) таска {self.request.id} через {countdown} сек из-за: {type(e_task_level).__name__}")
+                raise self.retry(exc=e_task_level, countdown=countdown) # self.retry выбросит исключение Retry
             else:
-                logger.error(f"Celery: Max retries ({self.max_retries}) достигнуто для {self.request.id} (с ЛОКАЛЬНЫМ ENGINE). Ошибка: {type(e_task_level).__name__}")
-                raise e_task_level 
-        except Exception as e_retry_logic: 
-            logger.error(f"Celery: Исключение в логике retry для {self.request.id} (с ЛОКАЛЬНЫМ ENGINE): {type(e_retry_logic).__name__}", exc_info=True)
-            raise e_task_level
+                logger.error(f"Celery: Max retries ({self.max_retries}) достигнуто для {self.request.id}. Ошибка: {type(e_task_level).__name__}")
+                raise e_task_level # Перевыбрасываем, чтобы Celery отметил как FAILED
+        except Exception as e_retry_logic: # Ловим исключения из self.retry, если что-то пошло не так с логикой ретрая
+            logger.error(f"Celery: Исключение в логике retry для {self.request.id}: {type(e_retry_logic).__name__}", exc_info=True)
+            raise e_task_level # Перевыбрасываем исходное исключение

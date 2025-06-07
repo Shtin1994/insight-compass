@@ -172,7 +172,7 @@ class PostRefreshMode(str, Enum):
 class CommentRefreshMode(str, Enum):
     NEW_POSTS_ONLY = "new_posts_only"       # Только для новых постов
     ADD_NEW_TO_EXISTING = "add_new_to_existing" # Дособрать новые к существующим постам (которые попали в выборку обновления постов)
-    DO_NOT_REFRESH = "do_not_refresh"       # Не собирать и не обновлять комментарии на этом шаге
+    # REBUILD_ALL = "rebuild_all"             # Полностью пересобрать (опасно, пока не делаем для MVP этой фичи)
 
 class AdvancedDataRefreshRequest(BaseModel):
     channel_ids: Optional[List[int]] = Field(None, description="Список ID каналов для обновления. Если None или пустой список - все активные.")

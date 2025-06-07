@@ -1,0 +1,142 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: insight_compass_db
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-insight_compass_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-insight_compass_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: insight_compass_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: insight_compass_api
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./app:/app
+      - ./.env:/app/.env:ro
+    working_dir: /
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - PYTHONPATH=/app
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - REDIS_HOST=redis
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - APP_HOST=${APP_HOST:-0.0.0.0}
+      - APP_PORT=${APP_PORT:-8000}
+      # Оставляем эти закомментированными для API, если они не обязательны в config.py для старта API
+      # - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      # - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      # - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: insight_compass_celery_worker
+    restart: unless-stopped
+    working_dir: / 
+    command: celery -A app.celery_app worker -l INFO -c 1 # <--- ИЗМЕНЕНИЕ ЗДЕСЬ
+    volumes:
+      - ./app:/app
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONPATH=/app
+      # Все эти переменные должны быть в .env, так как celery_worker их использует
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - REDIS_HOST=redis
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY} # Добавим и для worker'а, на случай если задачи AI будут
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  celery_beat: # <--- НОВЫЙ СЕРВИС
+    build:
+      context: ./app # Используем тот же образ
+      dockerfile: Dockerfile
+    container_name: insight_compass_celery_beat
+    restart: unless-stopped
+    working_dir: /
+    command: celery -A app.celery_app beat -l INFO # Простая команда, расписание в коде
+    volumes:
+      - ./app:/app
+      - ./.env:/app/.env:ro # Beat может понадобиться доступ к настройкам для импорта app.celery_app
+    environment:
+      - PYTHONPATH=/app
+      # Основные переменные для импорта app.celery_app и подключения к Redis
+      - REDIS_HOST=redis 
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      # Если app.celery_app импортирует app.core.config, то нужны и остальные обязательные переменные
+      # которые pydantic-settings будет пытаться загрузить.
+      # Поэтому передаем те же, что и для worker'а, для безопасности.
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis # Beat должен иметь доступ к брокеру для отправки задач
+      - db    # Если вдруг app.celery_app косвенно трогает БД при импорте (маловероятно, но безопаснее)
+      # - api # Обычно не требуется явная зависимость от API для Beat
+
+volumes:
+  postgres_data:
+  redis_data:
+
+# networks:
+#   app_network:
+#     driver: bridge

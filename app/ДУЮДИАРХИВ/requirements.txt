@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+psycopg2-binary
+redis
+telethon
+celery[redis]
+sqlalchemy[asyncio]  # SQLAlchemy с поддержкой asyncio
+alembic              # Для миграций базы данных
+asyncpg              # Асинхронный драйвер для PostgreSQL, используется SQLAlchemy[asyncio]
+openai
+python-telegram-bot[ext]
+httpx                # <--- ДОБАВЛЕНО для llm_service
