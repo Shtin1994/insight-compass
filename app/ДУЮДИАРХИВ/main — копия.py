@@ -40,19 +40,19 @@ except ImportError:
 try:
     from app.tasks import ( # Сгруппировал импорты для читаемости
         collect_telegram_data_task, 
-        summarize_posts_batch_task, # UPDATED: Was summarize_top_posts_task
+        summarize_top_posts_task, 
         send_daily_digest_task, 
         analyze_posts_sentiment_task, 
         enqueue_comments_for_ai_feature_analysis_task,
-        advanced_data_refresh_task
+        advanced_data_refresh_task # <--- НОВЫЙ ИМПОРТ ЗАДАЧИ
     )
 except ImportError as e:
     logging.getLogger(__name__).error(f"Ошибка импорта задач Celery: {e}")
     # Заглушки для всех задач, чтобы приложение могло запуститься
     def collect_telegram_data_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_collect'})()
-    def summarize_posts_batch_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_summary_batch'})() # UPDATED: Was summarize_top_posts_task & fake_task_id_summarize
+    def summarize_top_posts_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_summarize'})()
     def send_daily_digest_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_digest'})()
-    def analyze_posts_sentiment_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_sentiment'})() # Note: prompt specified fake_task_id_sentiment_batch for заглушка if missing, but original was fake_task_id_sentiment. Keeping original for now.
+    def analyze_posts_sentiment_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_sentiment'})()
     def enqueue_comments_for_ai_feature_analysis_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_comment_ai'})()
     def advanced_data_refresh_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_advanced_refresh'})()
 
@@ -574,12 +574,10 @@ async def run_collection_task_endpoint():
     task = collect_telegram_data_task.delay()
     return {"message": "Задача сбора данных запущена.", "task_id": task.id}
 
-@api_v1_router.post("/run-summarization-task/", summary="Запустить задачу суммаризации") # This refers to the old summarize_top_posts_task or potentially a general one.
+@api_v1_router.post("/run-summarization-task/", summary="Запустить задачу суммаризации")
 async def run_summarization_task_endpoint(): 
-    # This endpoint might need to be updated if `summarize_top_posts_task` was fully replaced by `summarize_posts_batch_task`
-    # For now, assuming it might call the new batch task without specific channel_ids (meaning all active)
-    task = summarize_posts_batch_task.delay() # Updated to call the new batch task
-    return {"message": "Задача суммаризации (пакетная) запущена.", "task_id": task.id}
+    task = summarize_top_posts_task.delay()
+    return {"message": "Задача суммаризации запущена.", "task_id": task.id}
 
 @api_v1_router.post("/run-daily-digest-task/", summary="Запустить задачу дайджеста")
 async def run_daily_digest_task_endpoint(): 
@@ -588,16 +586,12 @@ async def run_daily_digest_task_endpoint():
 
 @api_v1_router.post("/run-sentiment-analysis-task/", summary="Запустить задачу анализа тональности")
 async def run_sentiment_analysis_task_endpoint(): 
-    # This endpoint might also need adjustment if it's meant to be more specific or use channel_ids
-    # For now, it calls analyze_posts_sentiment_task without channel_ids, implying all active
-    task = analyze_posts_sentiment_task.delay(limit_posts_to_analyze=settings.POST_FETCH_LIMIT or 5) # limit_posts_to_analyze might not be relevant if channel_ids is the new primary filter
+    task = analyze_posts_sentiment_task.delay(limit_posts_to_analyze=settings.POST_FETCH_LIMIT or 5)
     return {"message": "Задача анализа тональности запущена.", "task_id": task.id}
 
 @api_v1_router.post("/run-comment-feature-analysis/", summary="Запустить AI-анализ фич комментариев")
-async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le=1000, description="Количество комментариев для постановки в очередь на анализ")): 
+async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le=1000, description="Количество комментариев для постановки в очередь на анализ")): # Увеличил дефолт и макс лимит
     endpoint_logger.info(f"POST /run-comment-feature-analysis/ - limit={limit}")
-    # This task is called per channel_id in the new batched endpoint.
-    # Calling it here without a channel_id_filter implies it will queue for all channels, or based on its internal logic.
     task = enqueue_comments_for_ai_feature_analysis_task.delay(limit_comments_to_queue=limit)
     return {"message": f"Задача AI-анализа фич для ~{limit} комментариев запущена.", "task_id": task.id}
 
@@ -610,6 +604,7 @@ async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le
 )
 async def run_advanced_data_refresh_endpoint(
     refresh_request: ui_schemas.AdvancedDataRefreshRequest,
+    # BackgroundTasks здесь не нужен, так как задача Celery асинхронна сама по себе
 ):
     endpoint_logger.info(f"POST /run-advanced-data-refresh/ - params: {refresh_request.model_dump(exclude_none=True)}")
     
@@ -631,94 +626,13 @@ async def run_advanced_data_refresh_endpoint(
         return ui_schemas.AdvancedDataRefreshResponse(
             message="Задача продвинутого обновления данных успешно поставлена в очередь.",
             task_id=task.id,
-            details=refresh_request.model_dump(exclude_none=True) 
+            details=refresh_request.model_dump(exclude_none=True) # exclude_none=True, чтобы не передавать None значения в 'details'
         )
     except Exception as e:
         endpoint_logger.error(f"Ошибка при постановке задачи advanced_data_refresh_task в очередь: {e}", exc_info=True)
         raise HTTPException(
             status_code=500, 
             detail=f"Не удалось запустить задачу продвинутого обновления: {str(e)}"
-        )
-
-# --- НОВЫЙ ЭНДПОИНТ ДЛЯ ПАКЕТНОГО AI-АНАЛИЗА (Кнопка 3) ---
-@api_v1_router.post(
-    "/run-batched-ai-analysis/",
-    response_model=ui_schemas.BatchedAIAnalysisResponse,
-    summary="Запустить пакетный AI-анализ (тональность, суммаризация, фичи комментариев)",
-    description="Запускает задачи AI-анализа для непроанализированных постов и комментариев в указанных каналах (или всех активных). Каждая задача обрабатывает одну пачку данных."
-)
-async def run_batched_ai_analysis_endpoint(
-    request_data: ui_schemas.BatchedAIAnalysisRequest,
-    db: AsyncSession = Depends(get_async_db) 
-):
-    endpoint_logger.info(f"POST /run-batched-ai-analysis/ - params: {request_data.model_dump(exclude_none=True)}")
-    
-    launched_tasks_info: List[ui_schemas.TaskInfo] = []
-    channels_to_process_ids: List[int] = []
-
-    if request_data.channel_ids and any(request_data.channel_ids):
-        stmt_check_channels = select(Channel.id).where(Channel.id.in_(request_data.channel_ids)).where(Channel.is_active == True)
-        active_requested_channels_result = await db.execute(stmt_check_channels)
-        channels_to_process_ids = active_requested_channels_result.scalars().all()
-        if not channels_to_process_ids:
-            logger.warning(f"Для пакетного AI-анализа не найдено активных каналов среди запрошенных: {request_data.channel_ids}")
-            return ui_schemas.BatchedAIAnalysisResponse(
-                message="Не найдено активных каналов среди запрошенных для анализа.",
-                launched_tasks=[]
-            )
-        logger.info(f"Пакетный AI-анализ будет выполнен для указанных активных каналов: {channels_to_process_ids}")
-    else:
-        active_channels_stmt = select(Channel.id).where(Channel.is_active == True)
-        active_channels_result = await db.execute(active_channels_stmt)
-        channels_to_process_ids = active_channels_result.scalars().all()
-        if not channels_to_process_ids:
-            logger.info("Для пакетного AI-анализа не найдено активных каналов в системе.")
-            return ui_schemas.BatchedAIAnalysisResponse(
-                message="В системе нет активных каналов для анализа.",
-                launched_tasks=[]
-            )
-        logger.info(f"Пакетный AI-анализ будет выполнен для всех ({len(channels_to_process_ids)}) активных каналов.")
-
-    try:
-        # Определяем channel_ids для задач, которые могут работать со списком каналов или None (для всех)
-        sentiment_task_input_channel_ids: Optional[List[int]] = None
-        if request_data.channel_ids and any(request_data.channel_ids):
-             # channels_to_process_ids уже содержит отфильтрованные активные ID
-            if channels_to_process_ids: # Если после фильтрации что-то осталось
-                sentiment_task_input_channel_ids = channels_to_process_ids
-        # Если sentiment_task_input_channel_ids остался None, задачи сами выберут все активные.
-
-        # 1. Запуск анализа тональности постов
-        task_sentiment = analyze_posts_sentiment_task.delay(channel_ids=sentiment_task_input_channel_ids)
-        launched_tasks_info.append(ui_schemas.TaskInfo(task_type="sentiment_analysis", task_id=task_sentiment.id))
-        logger.info(f"Задача анализа тональности постов запущена: {task_sentiment.id} (для каналов: {sentiment_task_input_channel_ids if sentiment_task_input_channel_ids else 'все активные'})")
-
-        # 2. Запуск суммаризации постов
-        task_summary = summarize_posts_batch_task.delay(channel_ids=sentiment_task_input_channel_ids) 
-        launched_tasks_info.append(ui_schemas.TaskInfo(task_type="summarization", task_id=task_summary.id))
-        logger.info(f"Задача суммаризации постов запущена: {task_summary.id} (для каналов: {sentiment_task_input_channel_ids if sentiment_task_input_channel_ids else 'все активные'})")
-
-        # 3. Запуск постановки комментариев в очередь на анализ (для каждого канала из channels_to_process_ids)
-        if channels_to_process_ids: 
-            for channel_id in channels_to_process_ids:
-                task_enqueue_comments = enqueue_comments_for_ai_feature_analysis_task.delay(
-                    channel_id_filter=channel_id,
-                    limit_comments_to_queue=settings.COMMENT_ENQUEUE_BATCH_SIZE, 
-                    process_only_recent_hours=None 
-                )
-                launched_tasks_info.append(ui_schemas.TaskInfo(task_type="comment_feature_enqueue", task_id=task_enqueue_comments.id, channel_id_processed=channel_id))
-                logger.info(f"Задача постановки комментариев в очередь для AI-анализа (канал {channel_id}) запущена: {task_enqueue_comments.id}")
-        
-        return ui_schemas.BatchedAIAnalysisResponse(
-            message="Задачи пакетного AI-анализа успешно поставлены в очередь.",
-            launched_tasks=launched_tasks_info
-        )
-
-    except Exception as e:
-        endpoint_logger.error(f"Ошибка при постановке задач пакетного AI-анализа в очередь: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Не удалось запустить задачи пакетного AI-анализа: {str(e)}"
         )
 
 app.include_router(api_v1_router)

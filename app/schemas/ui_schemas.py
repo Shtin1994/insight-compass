@@ -1,6 +1,6 @@
 # app/schemas/ui_schemas.py
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, field_validator # Добавил field_validator для >Pydantic V2
 from datetime import datetime, date
 from typing import List, Optional, Any, Dict
 from enum import Enum
@@ -12,8 +12,9 @@ class ChannelInfo(BaseModel):
     id: int 
     title: str
     username: Optional[str] = None
+
     class Config:
-        from_attributes = True
+        from_attributes = True # Для SQLAlchemy моделей
 
 class PostListItem(BaseModel):
     id: int
@@ -36,6 +37,7 @@ class PostListItem(BaseModel):
     grouped_id: Optional[int] = None       
     edited_at: Optional[datetime] = None
     is_pinned: Optional[bool] = None
+
     class Config:
         from_attributes = True
 
@@ -48,6 +50,7 @@ class CommentListItem(BaseModel):
     author_display_name: str 
     text: Optional[str] = None 
     commented_at: datetime
+
     class Config:
         from_attributes = True
 
@@ -63,7 +66,7 @@ class DashboardStatsResponse(BaseModel):
     channels_monitoring_count: int
 
 class ActivityOverTimePoint(BaseModel):
-    activity_date: date
+    activity_date: date # Используем date, а не datetime для агрегации по дням
     post_count: int
     comment_count: int
 
@@ -89,14 +92,15 @@ class SentimentDistributionResponse(BaseModel):
     total_analyzed_posts: int
     data: List[SentimentDistributionItem]
 
-class ChannelBase(BaseModel):
+class ChannelBase(BaseModel): # Базовая схема для канала, если понадобится
     pass
 
 class ChannelCreateRequest(BaseModel):
-    identifier: str = Field(..., description="Telegram channel username (e.g., 'durov') or full link (e.g., 'https://t.me/durov')")
+    identifier: str = Field(..., description="Telegram channel username (e.g., 'durov') or full link (e.g., 'https://t.me/durov') or ID")
 
 class ChannelUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
+    # Можно добавить другие поля для обновления, если нужно
 
 class ChannelResponse(ChannelBase):
     id: int 
@@ -107,14 +111,17 @@ class ChannelResponse(ChannelBase):
     last_processed_post_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
+
     class Config:
         from_attributes = True
 
-class ChannelListItem(BaseModel):
+class ChannelListItem(BaseModel): # Используется в PaginatedChannelsResponse
     id: int 
     title: str
     username: Optional[str] = None
     is_active: bool
+    # last_processed_post_id: Optional[int] = None # Можно добавить, если нужно на фронте
+
     class Config:
         from_attributes = True
 
@@ -142,9 +149,10 @@ class InsightItemType(str, Enum):
 class TrendGranularity(str, Enum):
     DAY = "day"
     WEEK = "week"
+    # MONTH = "month" # Можно добавить
 
 class InsightTrendDataPoint(BaseModel):
-    date: str 
+    date: str # YYYY-MM-DD для дня, YYYY-WW для недели
     count: int
 
 class InsightItemTrendResponse(BaseModel):
@@ -168,41 +176,44 @@ class PostRefreshMode(str, Enum):
     NEW_ONLY = "new_only"
     LAST_N_DAYS = "last_n_days"
     SINCE_DATE = "since_date"
-    UPDATE_STATS_ONLY = "update_stats_only" # Только обновить статистику существующих в БД постов
+    UPDATE_STATS_ONLY = "update_stats_only"
 
 class CommentRefreshMode(str, Enum):
-    NEW_POSTS_ONLY = "new_posts_only"       # Только для новых постов
-    ADD_NEW_TO_EXISTING = "add_new_to_existing" # Дособрать новые к существующим постам (которые попали в выборку обновления постов)
-    DO_NOT_REFRESH = "do_not_refresh"       # Не собирать и не обновлять комментарии на этом шаге
+    NEW_POSTS_ONLY = "new_posts_only"
+    ADD_NEW_TO_EXISTING = "add_new_to_existing"
+    DO_NOT_REFRESH = "do_not_refresh"
 
 class AdvancedDataRefreshRequest(BaseModel):
     channel_ids: Optional[List[int]] = Field(None, description="Список ID каналов для обновления. Если None или пустой список - все активные.")
     
     post_refresh_mode: PostRefreshMode = Field(default=PostRefreshMode.NEW_ONLY, description="Режим обновления постов.")
     post_refresh_days: Optional[int] = Field(None, ge=1, le=365, description="Количество дней для режима LAST_N_DAYS.")
-    post_refresh_start_date_str: Optional[str] = Field(None, description="Дата начала для режима SINCE_DATE (YYYY-MM-DD).") # Строка для API
-    post_limit_per_channel: int = Field(default=100, ge=10, le=5000, description="Лимит постов на канал для проверки/сбора при режимах LAST_N_DAYS или SINCE_DATE.")
+    post_refresh_start_date_str: Optional[str] = Field(None, description="Дата начала для режима SINCE_DATE (YYYY-MM-DD).")
+    post_limit_per_channel: int = Field(default=100, ge=10, le=5000, description="Лимит постов на канал для режимов, где это применимо.")
     
-    update_existing_posts_info: bool = Field(default=False, description="Обновлять ли информацию (просмотры, реакции) для уже существующих в БД постов, попадающих в выборку.")
+    update_existing_posts_info: bool = Field(default=False, description="Обновлять ли информацию для уже существующих в БД постов.")
     
     comment_refresh_mode: CommentRefreshMode = Field(default=CommentRefreshMode.ADD_NEW_TO_EXISTING, description="Режим обновления комментариев.")
     comment_limit_per_post: int = Field(default=settings.COMMENT_FETCH_LIMIT, ge=10, le=1000, description="Лимит комментариев на пост для сбора.")
 
     analyze_new_comments: bool = Field(default=True, description="Запускать ли AI-анализ для новых комментариев после сбора.")
 
-    # Валидаторы для связанных полей
-    @validator('post_refresh_days', always=True)
+    @field_validator('post_refresh_days', mode='before') # Используем field_validator для Pydantic v2
+    @classmethod
     def check_post_refresh_days(cls, v, values):
-        # Используем get для безопасного доступа к 'post_refresh_mode', который может еще не быть в values
-        if values.get('post_refresh_mode') == PostRefreshMode.LAST_N_DAYS and v is None:
+        # Pydantic v2: values - это уже объект данных, а не словарь
+        data = values.data if hasattr(values, 'data') else values # Обработка для совместимости
+        if data.get('post_refresh_mode') == PostRefreshMode.LAST_N_DAYS and v is None:
             raise ValueError('post_refresh_days is required when post_refresh_mode is "last_n_days"')
         return v
 
-    @validator('post_refresh_start_date_str', always=True)
+    @field_validator('post_refresh_start_date_str', mode='before')
+    @classmethod
     def check_post_refresh_start_date_str(cls, v, values):
-        if values.get('post_refresh_mode') == PostRefreshMode.SINCE_DATE and v is None:
+        data = values.data if hasattr(values, 'data') else values
+        if data.get('post_refresh_mode') == PostRefreshMode.SINCE_DATE and v is None:
             raise ValueError('post_refresh_start_date_str is required when post_refresh_mode is "since_date"')
-        if v is not None: # Проверяем формат даты, если она передана
+        if v is not None:
             try:
                 datetime.strptime(v, "%Y-%m-%d")
             except ValueError:
@@ -215,3 +226,19 @@ class AdvancedDataRefreshResponse(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 # --- КОНЕЦ: Схемы для "Продвинутого обновления данных" ---
+
+# --- НАЧАЛО: Схемы для пакетного AI-анализа (Кнопка 3) ---
+
+class BatchedAIAnalysisRequest(BaseModel):
+    channel_ids: Optional[List[int]] = Field(None, description="Список ID каналов для анализа. Если None или пустой список - все активные.")
+
+class TaskInfo(BaseModel):
+    task_type: str = Field(..., description="Тип запущенной задачи (например, 'sentiment_analysis', 'summarization', 'comment_feature_enqueue')")
+    task_id: str = Field(..., description="ID запущенной Celery задачи")
+    channel_id_processed: Optional[int] = Field(None, description="ID канала, для которого запущена задача (актуально для comment_feature_enqueue)")
+
+class BatchedAIAnalysisResponse(BaseModel):
+    message: str = Field(..., description="Сообщение о результате постановки задач в очередь")
+    launched_tasks: List[TaskInfo] = Field(default_factory=list, description="Информация о запущенных Celery задачах")
+
+# --- КОНЕЦ: Схемы для пакетного AI-анализа ---

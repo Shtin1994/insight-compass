@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 import logging
 
 import openai
-from openai import OpenAIError 
+from openai import OpenAIError # Убедись, что этот импорт есть, если используется
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -19,7 +19,6 @@ from sqlalchemy.future import select
 from sqlalchemy import desc, func, update, cast, literal_column, nullslast, Integer as SAInteger, or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import text # Добавлено для SQL запроса
 
 import telegram
 from telegram.constants import ParseMode
@@ -43,9 +42,9 @@ from telethon.requestiter import RequestIter
 
 from app.celery_app import celery_instance
 from app.core.config import settings
-from app.models.telegram_data import Channel, Post, Comment 
-from app.db.session import get_async_session_context_manager 
-from app.schemas.ui_schemas import PostRefreshMode, CommentRefreshMode 
+from app.models.telegram_data import Channel, Post, Comment # Убедись, что путь правильный
+from app.db.session import get_async_session_context_manager # Убедись, что путь правильный
+from app.schemas.ui_schemas import PostRefreshMode, CommentRefreshMode # Убедись, что путь правильный
 
 try:
     from app.services.llm_service import одиночный_запрос_к_llm
@@ -129,35 +128,31 @@ async def _process_reactions_for_db(message_reactions_attr: Optional[MessageRepl
 async def _helper_fetch_and_process_comments_for_post(
     tg_client: TelegramClient,
     db: AsyncSession,
-    post_db_obj: Post, 
+    post_db_obj: Post,
     tg_channel_entity: TelethonChannelType,
     comment_limit: int,
     log_prefix: str = "[CommentHelper]"
-) -> Tuple[int, List[int]]: 
+) -> Tuple[int, List[int]]:
     new_comments_count_for_post = 0
     new_comment_ids_for_post: List[int] = []
     existing_comment_tg_ids_stmt = select(Comment.telegram_comment_id).where(Comment.post_id == post_db_obj.id)
     existing_comment_tg_ids_res = await db.execute(existing_comment_tg_ids_stmt)
     existing_comment_tg_ids_set = set(existing_comment_tg_ids_res.scalars().all())
-    
-    logger.debug(f"{log_prefix}    Пост ID {post_db_obj.id} (TG ID: {post_db_obj.telegram_post_id}): в БД уже есть {len(existing_comment_tg_ids_set)} комментариев. Запрашиваем из Telegram (лимит: {comment_limit}).")
-
     flood_wait_attempts_for_post = 0
-    max_flood_wait_attempts = 2 
+    max_flood_wait_attempts = 2
 
     while flood_wait_attempts_for_post < max_flood_wait_attempts:
         try:
             message_iterator: RequestIter = tg_client.iter_messages(
                 entity=tg_channel_entity,
-                limit=comment_limit, 
+                limit=comment_limit,
                 reply_to=post_db_obj.telegram_post_id
             )
             async for tg_comment_msg in message_iterator:
                 tg_comment_msg: Message
                 if tg_comment_msg.action or not (tg_comment_msg.text or tg_comment_msg.media or tg_comment_msg.poll):
                     continue
-                if tg_comment_msg.id in existing_comment_tg_ids_set: 
-                    continue
+                if tg_comment_msg.id in existing_comment_tg_ids_set: continue
 
                 comm_text, comm_caption = (None, tg_comment_msg.text) if tg_comment_msg.media and tg_comment_msg.text else (tg_comment_msg.text, None)
                 comm_media_type, comm_media_info = await _process_media_for_db(tg_comment_msg.media)
@@ -178,34 +173,36 @@ async def _helper_fetch_and_process_comments_for_post(
                     reactions=comm_reactions, reply_to_telegram_comment_id=comm_reply_to_id,
                     media_type=comm_media_type, media_content_info=comm_media_info,
                     caption_text=comm_caption,
-                    edited_at=tg_comment_msg.edit_date.replace(tzinfo=timezone.utc) if tg_comment_msg.edit_date else None,
+                    edited_at=tg_comment_msg.edit_date.replace(tzinfo=timezone.utc) if tg_comment_msg.edit_date else None
                 )
                 db.add(new_comment_db)
-                await db.flush() 
+                await db.flush()
                 if new_comment_db.id: new_comment_ids_for_post.append(new_comment_db.id)
                 new_comments_count_for_post += 1
-                existing_comment_tg_ids_set.add(tg_comment_msg.id) 
 
             if new_comments_count_for_post > 0:
-                logger.info(f"{log_prefix}    Для поста ID {post_db_obj.id} (TG ID: {post_db_obj.telegram_post_id}) добавлено {new_comments_count_for_post} новых комментариев в БД.")
-            
-            break 
+                await db.execute(
+                    update(Post)
+                    .where(Post.id == post_db_obj.id)
+                    .values(comments_count = Post.comments_count + new_comments_count_for_post) # Предполагается, что Post.comments_count - это счетчик из нашей БД, который мы обновляем
+                )
+                logger.info(f"{log_prefix}    Для поста ID {post_db_obj.id} (TG ID: {post_db_obj.telegram_post_id}) добавлено {new_comments_count_for_post} новых комментариев. Счетчик будет обновлен.")
+            break
 
         except TelethonMessageIdInvalidError:
-            logger.warning(f"{log_prefix}    Комментарии для поста {post_db_obj.telegram_post_id} (DB ID: {post_db_obj.id}) не найдены или недоступны в Telegram (MsgIdInvalid). Ранее собранных в БД: {len(existing_comment_tg_ids_set)}.")
+            logger.warning(f"{log_prefix}    Комментарии для поста {post_db_obj.telegram_post_id} не найдены или недоступны (MsgIdInvalid).")
             break
         except FloodWaitError as fwe_c:
             flood_wait_attempts_for_post += 1
             if flood_wait_attempts_for_post >= max_flood_wait_attempts:
-                logger.error(f"{log_prefix}    Превышен лимит ({max_flood_wait_attempts}) попыток FloodWait для поста {post_db_obj.telegram_post_id}. Пропускаем сбор комм. для этого поста окончательно.")
+                logger.error(f"{log_prefix}    Превышен лимит ({max_flood_wait_attempts}) попыток FloodWait для поста {post_db_obj.telegram_post_id}. Пропускаем пост окончательно.")
                 break
             else:
                 logger.warning(f"{log_prefix}    FloodWait ({fwe_c.seconds}s) при сборе комм. для поста {post_db_obj.telegram_post_id} (попытка {flood_wait_attempts_for_post}/{max_flood_wait_attempts}). Ждем и пытаемся снова для этого же поста.")
-                await asyncio.sleep(fwe_c.seconds + 5) 
+                await asyncio.sleep(fwe_c.seconds + 10)
         except Exception as e_c:
-            logger.error(f"{log_prefix}    Ошибка сбора комм. для поста {post_db_obj.telegram_post_id} (DB ID: {post_db_obj.id}): {type(e_c).__name__} - {e_c}", exc_info=True)
+            logger.error(f"{log_prefix}    Ошибка сбора комм. для поста {post_db_obj.telegram_post_id}: {type(e_c).__name__} - {e_c}", exc_info=True)
             break
-            
     return new_comments_count_for_post, new_comment_ids_for_post
 
 
@@ -229,6 +226,12 @@ async def _helper_fetch_and_process_posts_for_channel(
         if isinstance(tg_message, MessageService) or tg_message.action: continue
         if not (tg_message.text or tg_message.media or tg_message.poll): continue
         
+        # В режиме NEW_ONLY, если iter_params не содержат min_id (т.е. last_processed_post_id был None),
+        # то мы все равно обрабатываем пост, но если min_id есть, то сообщения старше него не должны приходить.
+        # Эта проверка здесь может быть избыточной, если iter_messages с min_id работает как ожидается.
+        # if iter_params.get("min_id") and tg_message.id <= iter_params["min_id"]:
+        #     continue # Пропускаем уже обработанные или слишком старые, если min_id установлен
+
         if tg_message.id > latest_post_id_tg_seen_this_run:
             latest_post_id_tg_seen_this_run = tg_message.id
             
@@ -244,6 +247,7 @@ async def _helper_fetch_and_process_posts_for_channel(
         posted_at_val = tg_message.date.replace(tzinfo=timezone.utc) if tg_message.date else datetime.now(timezone.utc)
         edited_at_val = tg_message.edit_date.replace(tzinfo=timezone.utc) if tg_message.edit_date else None
         
+        # Получаем comments_count из Telegram API, если доступно
         api_comments_count = tg_message.replies.replies if tg_message.replies and tg_message.replies.replies is not None else 0
 
         post_for_comments_scan_candidate = None
@@ -251,7 +255,7 @@ async def _helper_fetch_and_process_posts_for_channel(
             new_post = Post(
                 telegram_post_id=tg_message.id, channel_id=channel_db.id, link=link_val,
                 text_content=post_text_content, caption_text=post_caption_text,
-                views_count=tg_message.views, comments_count=api_comments_count, 
+                views_count=tg_message.views, comments_count=api_comments_count, # Используем значение из API
                 posted_at=posted_at_val, reactions=reactions_data, media_type=media_type,
                 media_content_info=media_info, reply_to_telegram_post_id=reply_to_id,
                 forwards_count=tg_message.forwards, author_signature=tg_message.post_author,
@@ -265,29 +269,30 @@ async def _helper_fetch_and_process_posts_for_channel(
             existing_post_db.reactions = reactions_data
             existing_post_db.forwards_count = tg_message.forwards
             existing_post_db.edited_at = edited_at_val
-            existing_post_db.comments_count = api_comments_count 
+            existing_post_db.comments_count = api_comments_count # Обновляем comments_count из API
+            # Обновляем и другие поля, если они могли измениться
             existing_post_db.text_content = post_text_content
             existing_post_db.caption_text = post_caption_text
             existing_post_db.media_type = media_type
             existing_post_db.media_content_info = media_info
             existing_post_db.is_pinned = tg_message.pinned or False
             existing_post_db.author_signature = tg_message.post_author
-            existing_post_db.updated_at = datetime.now(timezone.utc)
             
             db.add(existing_post_db); post_for_comments_scan_candidate = existing_post_db; updated_posts_count_channel += 1
-        else: 
+        else: # Пост существует, но флаг update_existing_info_flag=False
             post_for_comments_scan_candidate = existing_post_db
-            if existing_post_db.comments_count != api_comments_count:
-                logger.debug(f"{log_prefix} Пост TG ID {existing_post_db.telegram_post_id}: comments_count обновлен с {existing_post_db.comments_count} на {api_comments_count} (update_existing_info_flag=False).")
-                existing_post_db.comments_count = api_comments_count
-                existing_post_db.updated_at = datetime.now(timezone.utc)
-                db.add(existing_post_db)
+            # Важно: даже если не обновляем всю инфу, comments_count из API может понадобиться для логики сбора комментов
+            # Но если мы не обновляем Post.comments_count в БД, то _helper_fetch_and_process_comments_for_post
+            # будет использовать старое значение из БД для Post.comments_count при обновлении счетчика.
+            # Решение: если update_existing_info_flag=False, но Post.comments_count из API отличается от БД,
+            # то мы можем обновить только его, или передать api_comments_count в _helper_fetch_and_process_comments_for_post.
+            # Пока оставляем как есть, но это потенциальная точка для улучшения.
 
         if post_for_comments_scan_candidate: posts_for_comment_scan_candidates.append(post_for_comments_scan_candidate)
 
     return posts_for_comment_scan_candidates, newly_created_post_objects, new_posts_count_channel, updated_posts_count_channel, latest_post_id_tg_seen_this_run
 
-# --- ЗАДАЧИ CELERY ---
+# --- ЗАДАЧИ CELERY (ПОЛНЫЕ ВЕРСИИ С АДАПТАЦИЕЙ) ---
 
 @celery_instance.task(name="add")
 def add(x, y):
@@ -315,25 +320,14 @@ def collect_telegram_data_task(self):
     async def _async_collect_data_logic():
         tg_client = None; total_ch_proc, total_new_p, total_upd_p, total_new_c = 0,0,0,0
         all_new_comment_ids_task_total: List[int] = []
-        local_engine = None
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
-            if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory_Task = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
-            logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи {self.name}.")
-
-            async with LocalAsyncSessionFactory_Task() as db: 
+            async with get_async_session_context_manager() as db:
                 tg_client = TelegramClient(session_file_path, api_id_val, api_hash_val)
                 await tg_client.connect()
                 if not await tg_client.is_user_authorized():
                     raise ConnectionRefusedError(f"Пользователь не авторизован для {session_file_path}.session")
                 me = await tg_client.get_me()
-                logger.info(f"{log_prefix} TGClient подключен как: {me.first_name if me else 'N/A'}")
+                logger.info(f"{log_prefix} TGClient подключен как: {me.first_name}")
                 active_channels_db_result = await db.execute(select(Channel).where(Channel.is_active == True))
                 active_channels_db: List[Channel] = active_channels_db_result.scalars().all()
 
@@ -357,32 +351,18 @@ def collect_telegram_data_task(self):
                             iter_params["offset_date"] = settings.INITIAL_POST_FETCH_START_DATETIME
                             iter_params["reverse"] = True
 
-                        # update_existing_info_flag=False, т.к. это сбор только новых постов
-                        processed_posts_list, newly_created_posts, new_p_ch, _, last_id_tg = await _helper_fetch_and_process_posts_for_channel(
-                            tg_client, db, channel_db, iter_params, 
-                            update_existing_info_flag=False, 
-                            log_prefix=log_prefix
-                        )
+                        _, newly_created_posts, new_p_ch, _, last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_info_flag=False, log_prefix=log_prefix)
                         total_new_p += new_p_ch
                         if last_id_tg > (channel_db.last_processed_post_id or 0):
                             channel_db.last_processed_post_id = last_id_tg
                             db.add(channel_db)
 
-                        # Собираем комментарии только для НОВЫХ постов
                         if newly_created_posts:
                             logger.info(f"{log_prefix}  Сбор комментариев для {len(newly_created_posts)} новых постов...")
                             for post_obj in newly_created_posts:
-                                num_c, new_c_ids = await _helper_fetch_and_process_comments_for_post(
-                                    tg_client, db, post_obj, tg_channel_entity, 
-                                    settings.COMMENT_FETCH_LIMIT, log_prefix=log_prefix
-                                )
+                                num_c, new_c_ids = await _helper_fetch_and_process_comments_for_post(tg_client, db, post_obj, tg_channel_entity, settings.COMMENT_FETCH_LIMIT, log_prefix=log_prefix)
                                 total_new_c += num_c
                                 all_new_comment_ids_task_total.extend(new_c_ids)
-                                # После сбора комментов, Post.comments_count в БД для этого post_obj НЕ обновляется здесь,
-                                # т.к. _helper_fetch_and_process_comments_for_post больше не делает этого.
-                                # Post.comments_count был установлен из API при создании поста в _helper_fetch_and_process_posts_for_channel.
-                                # Это корректно для НОВЫХ постов.
-
                     except (ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError) as e_ch_access:
                         logger.warning(f"{log_prefix}  Канал {channel_db.id} ('{channel_db.title}') недоступен: {e_ch_access}. Деактивируем.")
                         channel_db.is_active = False; db.add(channel_db)
@@ -399,24 +379,8 @@ def collect_telegram_data_task(self):
                         logger.debug(f"{log_prefix} Пауза 1 сек перед обработкой следующего канала.")
                         await asyncio.sleep(1)
                 await db.commit()
-                summary = f"Сбор данных завершен. Каналов: {total_ch_proc}, Новых постов: {total_new_p}, Новых комм. собрано (только для новых постов): {total_new_c}."
+                summary = f"Сбор данных завершен. Каналов: {total_ch_proc}, Новых постов: {total_new_p}, Новых комм.: {total_new_c}."
                 logger.info(f"{log_prefix} {summary}")
-                
-                if all_new_comment_ids_task_total:
-                    unique_comment_ids_for_ai = sorted(list(set(all_new_comment_ids_task_total)))
-                    logger.info(f"{log_prefix} Запуск AI-анализа для {len(unique_comment_ids_for_ai)} новых комментариев из collect_telegram_data_task.")
-                    
-                    ai_analysis_sub_batch_size = settings.COMMENT_ENQUEUE_BATCH_SIZE 
-                    num_sub_tasks = 0
-                    for i in range(0, len(unique_comment_ids_for_ai), ai_analysis_sub_batch_size):
-                        batch_comment_ids = unique_comment_ids_for_ai[i:i + ai_analysis_sub_batch_size]
-                        logger.info(f"{log_prefix}  Ставлю в очередь на AI-анализ задачу enqueue_comments_for_ai_feature_analysis_task с {len(batch_comment_ids)} ID комментариев.")
-                        enqueue_comments_for_ai_feature_analysis_task.delay(
-                            comment_ids_to_process=batch_comment_ids
-                        )
-                        num_sub_tasks += 1
-                    logger.info(f"{log_prefix} AI-анализ для {len(unique_comment_ids_for_ai)} комментариев поставлен в очередь ({num_sub_tasks} задач(и) enqueue_comments_for_ai_feature_analysis_task).")
-
                 return summary
         except ConnectionRefusedError as e_auth:
             logger.error(f"{log_prefix} ОШИБКА АВТОРИЗАЦИИ TELETHON: {e_auth}", exc_info=True); raise
@@ -425,9 +389,6 @@ def collect_telegram_data_task(self):
         finally:
             if tg_client and tg_client.is_connected():
                 await tg_client.disconnect()
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally для задачи {self.name}.")
-                await local_engine.dispose()
     try:
         result = asyncio.run(_async_collect_data_logic())
         logger.info(f"{log_prefix} Таск '{self.name}' успешно завершен за {time.time() - task_start_time:.2f} сек. Результат: {result}")
@@ -450,21 +411,15 @@ def collect_telegram_data_task(self):
             logger.error(f"Celery: Исключение в логике retry для таска {self.request.id}: {type(e_retry_logic).__name__}", exc_info=True)
             raise e_final_task
 
-@celery_instance.task(name="summarize_posts_batch", bind=True, max_retries=2, default_retry_delay=300)
-def summarize_posts_batch_task(
+@celery_instance.task(name="summarize_posts_batch", bind=True, max_retries=2, default_retry_delay=300) # Переименовал для ясности
+def summarize_posts_batch_task( # Переименовал
     self, 
-    channel_ids: Optional[List[int]] = None,
-    start_date_iso: Optional[str] = None, 
-    end_date_iso: Optional[str] = None,
+    channel_ids: Optional[List[int]] = None, # Новый параметр
+    # hours_ago и top_n больше не нужны в таком виде
 ):
-    limit_posts_to_process = settings.POST_SUMMARY_BATCH_SIZE
+    limit_posts_to_process = settings.POST_SUMMARY_BATCH_SIZE # Используем новую настройку
     task_start_time = time.time()
-    log_prefix_parts = ["[PostSummaryTask"]
-    if channel_ids: log_prefix_parts.append(f"Channels:{channel_ids}")
-    if start_date_iso: log_prefix_parts.append(f"Start:{start_date_iso}")
-    if end_date_iso: log_prefix_parts.append(f"End:{end_date_iso}")
-    log_prefix = "".join(log_prefix_parts) + "]"
-    
+    log_prefix = f"[PostSummaryTask(Channels:{channel_ids if channel_ids else 'All'})]"
     logger.info(f"{log_prefix} Запущен Celery таск '{self.name}' (ID: {self.request.id}). Лимит пачки: {limit_posts_to_process}.")
 
     if not settings.OPENAI_API_KEY:
@@ -473,45 +428,26 @@ def summarize_posts_batch_task(
 
     async def _async_logic():
         processed_count_in_batch = 0
-        local_engine = None 
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
-            if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory_Task = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
-            logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
-
-            async with LocalAsyncSessionFactory_Task() as db_session: 
+            async with get_async_session_context_manager() as db_session:
                 stmt = (
                     select(Post)
-                    .where(Post.summary_text.is_(None)) 
-                    .where(or_(Post.text_content.isnot(None), Post.caption_text.isnot(None)))
-                    .order_by(Post.posted_at.asc()) 
+                    .where(Post.summary_text.is_(None)) # Только те, что не суммаризированы
+                    .where(or_( # Убедимся, что есть текст для суммаризации
+                        Post.text_content.isnot(None), 
+                        Post.caption_text.isnot(None)
+                     ))
+                    .order_by(Post.posted_at.asc()) # Обрабатываем от старых к новым
                     .limit(limit_posts_to_process)
                 )
 
                 if channel_ids:
                     logger.info(f"{log_prefix} Суммаризация для каналов: {channel_ids}")
                     stmt = stmt.where(Post.channel_id.in_(channel_ids))
-                else: 
-                    logger.info(f"{log_prefix} Суммаризация для всех активных каналов (если даты не указаны).")
-                    if not start_date_iso and not end_date_iso:
-                         active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery()
-                         stmt = stmt.join(active_channels_subquery, Post.channel_id == active_channels_subquery.c.id)
-                
-                if start_date_iso:
-                    dt_start = datetime.fromisoformat(start_date_iso.split('T')[0]).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                    stmt = stmt.where(Post.posted_at >= dt_start)
-                    logger.info(f"{log_prefix} Применен фильтр start_date: {dt_start}")
-                if end_date_iso:
-                    dt_end_naive = datetime.fromisoformat(end_date_iso.split('T')[0])
-                    dt_end = datetime(dt_end_naive.year, dt_end_naive.month, dt_end_naive.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
-                    stmt = stmt.where(Post.posted_at <= dt_end)
-                    logger.info(f"{log_prefix} Применен фильтр end_date: {dt_end}")
+                else: # Если channel_ids не переданы, берем только из активных каналов
+                    logger.info(f"{log_prefix} Суммаризация для всех активных каналов.")
+                    active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery()
+                    stmt = stmt.join(active_channels_subquery, Post.channel_id == active_channels_subquery.c.id)
 
                 posts_to_process_result = await db_session.execute(stmt)
                 posts_to_process = posts_to_process_result.scalars().all()
@@ -523,24 +459,45 @@ def summarize_posts_batch_task(
                 logger.info(f"{log_prefix} Найдено {len(posts_to_process)} постов для суммаризации в этой пачке.")
                 for post_obj in posts_to_process:
                     text_to_summarize = post_obj.caption_text if post_obj.caption_text and post_obj.caption_text.strip() else post_obj.text_content
-                    if not text_to_summarize or len(text_to_summarize.strip()) < 30: 
+                    
+                    if not text_to_summarize or len(text_to_summarize.strip()) < 30: # Минимальная длина для осмысленной суммаризации
                         logger.info(f"{log_prefix}  Пост ID {post_obj.id} ({post_obj.link}) слишком короткий или без текста. Суммаризация пропущена, помечаем как обработанный (пустым резюме).")
-                        post_obj.summary_text = ""; post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); processed_count_in_batch +=1
+                        post_obj.summary_text = "" # Помечаем пустым, чтобы не пытаться снова
+                        post_obj.updated_at = datetime.now(timezone.utc)
+                        db_session.add(post_obj)
+                        processed_count_in_batch +=1 # Считаем это как обработанное (пропущенное)
                         continue
+
                     logger.info(f"{log_prefix}  Суммаризация поста ID {post_obj.id} ({post_obj.link})...")
                     try:
                         summary_prompt = f"Текст поста:\n---\n{text_to_summarize[:settings.LLM_MAX_PROMPT_LENGTH]}\n---\nНапиши краткое резюме (1-3 предложения на русском) основной мысли этого поста."
-                        summary = await одиночный_запрос_к_llm(summary_prompt, модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo", температура=0.3, макс_токены=250, is_json_response_expected=False)
+                        summary = await одиночный_запрос_к_llm(
+                            summary_prompt,
+                            модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo",
+                            температура=0.3,
+                            макс_токены=250, 
+                            is_json_response_expected=False
+                        )
                         if summary and summary.strip():
-                            post_obj.summary_text = summary.strip(); post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); processed_count_in_batch += 1
+                            post_obj.summary_text = summary.strip()
+                            post_obj.updated_at = datetime.now(timezone.utc)
+                            db_session.add(post_obj)
+                            processed_count_in_batch += 1
                             logger.info(f"{log_prefix}    Резюме для поста ID {post_obj.id} получено и сохранено.")
                         else:
                             logger.warning(f"{log_prefix}    LLM не вернул текст резюме для поста ID {post_obj.id}. Помечаем как обработанный (пустым резюме).")
-                            post_obj.summary_text = ""; post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); processed_count_in_batch +=1
-                    except OpenAIError as e_llm: logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при суммаризации поста ID {post_obj.id}: {type(e_llm).__name__} - {e_llm}"); continue 
-                    except Exception as e_sum: logger.error(f"{log_prefix}    !!! Неожиданная ошибка при суммаризации поста ID {post_obj.id}: {type(e_sum).__name__} - {e_sum}", exc_info=True); continue
+                            post_obj.summary_text = "" # Помечаем, чтобы не пытаться снова
+                            post_obj.updated_at = datetime.now(timezone.utc)
+                            db_session.add(post_obj)
+                            processed_count_in_batch +=1
+                    except OpenAIError as e_llm:
+                        logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при суммаризации поста ID {post_obj.id}: {type(e_llm).__name__} - {e_llm}")
+                        continue # Пропускаем этот пост
+                    except Exception as e_sum:
+                        logger.error(f"{log_prefix}    !!! Неожиданная ошибка при суммаризации поста ID {post_obj.id}: {type(e_sum).__name__} - {e_sum}", exc_info=True)
+                        continue # Пропускаем этот пост
                 
-                if processed_count_in_batch > 0: 
+                if processed_count_in_batch > 0: # Если хоть что-то было обработано или помечено как обработанное
                     await db_session.commit()
                     logger.info(f"{log_prefix}  Обработано (суммаризировано/пропущено) {processed_count_in_batch} постов в этой пачке.")
 
@@ -548,10 +505,6 @@ def summarize_posts_batch_task(
         except Exception as e_async_main:
             logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в _async_logic: {type(e_async_main).__name__} - {e_async_main}", exc_info=True)
             raise
-        finally: 
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
-                await local_engine.dispose()
 
     try:
         result_message = asyncio.run(_async_logic())
@@ -573,29 +526,16 @@ def summarize_posts_batch_task(
 
 @celery_instance.task(name="send_daily_digest", bind=True, max_retries=3, default_retry_delay=180)
 def send_daily_digest_task(self, hours_ago_posts=24, top_n_metrics=3):
-    task_start_time = time.time(); log_prefix = "[DigestTask]"; logger.info(f"{log_prefix} Запущен Celery таск '{self.name}' (ID: {self.request.id})...")
+    task_start_time = time.time(); logger.info(f"Запущен Celery таск '{self.name}' (ID: {self.request.id}) (Отправка РАСШИРЕННОГО ежедневного дайджеста)...")
     if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_TARGET_CHAT_ID:
         error_msg = "Ошибка: TELEGRAM_BOT_TOKEN или TELEGRAM_TARGET_CHAT_ID не настроены."
         logger.error(error_msg)
         return error_msg
-        
-    local_engine = None
 
     async def _async_send_digest_logic():
-        nonlocal local_engine
         bot = telegram.Bot(token=settings.TELEGRAM_BOT_TOKEN); message_parts = []
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
-            if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory_Task = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
-            logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи {self.name}.")
-
-            async with LocalAsyncSessionFactory_Task() as db_session:
+            async with get_async_session_context_manager() as db_session:
                 time_threshold_posts = datetime.now(timezone.utc) - timedelta(hours=hours_ago_posts)
                 message_parts.append(helpers.escape_markdown(f" digest for Insight-Compass за последние {hours_ago_posts} часа:\n", version=2))
                 active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery("active_channels_sq_digest")
@@ -650,13 +590,8 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_metrics=3):
         except Exception as e_digest_logic:
             logger.error(f"!!! Ошибка в _async_send_digest_logic: {type(e_digest_logic).__name__} - {e_digest_logic}", exc_info=True)
             raise
-        finally:
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally для задачи {self.name}.")
-                await local_engine.dispose()
-
     try:
-        result_message = asyncio.run(_async_send_digest_logic()); task_duration = time.time() - task_start_time; logger.info(f"{log_prefix} Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}"); return result_message
+        result_message = asyncio.run(_async_send_digest_logic()); task_duration = time.time() - task_start_time; logger.info(f"Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}"); return result_message
     except Exception as e_task_digest:
         task_duration = time.time() - task_start_time; logger.error(f"!!! КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_digest).__name__} - {e_task_digest}", exc_info=True)
         try:
@@ -675,66 +610,42 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_metrics=3):
 @celery_instance.task(name="analyze_posts_sentiment", bind=True, max_retries=2, default_retry_delay=300)
 def analyze_posts_sentiment_task(
     self, 
-    channel_ids: Optional[List[int]] = None,
-    start_date_iso: Optional[str] = None, 
-    end_date_iso: Optional[str] = None,
+    channel_ids: Optional[List[int]] = None, # Новый параметр
+    # limit_posts_to_analyze больше не принимаем, берем из settings
 ):
-    limit_posts_to_process = settings.POST_ANALYSIS_BATCH_SIZE
+    limit_posts_to_process = settings.POST_ANALYSIS_BATCH_SIZE # Используем настройку
     task_start_time = time.time()
-    log_prefix_parts = ["[PostSentimentTask"]
-    if channel_ids: log_prefix_parts.append(f"Channels:{channel_ids}")
-    if start_date_iso: log_prefix_parts.append(f"Start:{start_date_iso}")
-    if end_date_iso: log_prefix_parts.append(f"End:{end_date_iso}")
-    log_prefix = "".join(log_prefix_parts) + "]"
-    
+    log_prefix = f"[PostSentimentTask(Channels:{channel_ids if channel_ids else 'All'})]"
     logger.info(f"{log_prefix} Запущен Celery таск '{self.name}' (ID: {self.request.id}). Лимит пачки: {limit_posts_to_process}.")
     
     if not settings.OPENAI_API_KEY:
         logger.error(f"{log_prefix} Ошибка: OPENAI_API_KEY не настроен.")
+        # Не выбрасываем исключение, чтобы не ретраить, если ключ не задан глобально
         return "Config error: OpenAI Key not configured."
 
     async def _async_logic():
         analyzed_count_in_batch = 0
-        local_engine = None 
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
-            if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory_Task = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
-            logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
-
-            async with LocalAsyncSessionFactory_Task() as db_session: 
+            async with get_async_session_context_manager() as db_session:
+                # Формируем базовый запрос
                 stmt = (
                     select(Post)
                     .where(or_(Post.text_content.isnot(None), Post.caption_text.isnot(None)))
-                    .where(Post.post_sentiment_label.is_(None)) 
-                    .order_by(Post.posted_at.asc()) 
+                    .where(Post.post_sentiment_label.is_(None)) # Только непроанализированные
+                    .order_by(Post.posted_at.asc()) # Обрабатываем от старых к новым
                     .limit(limit_posts_to_process) 
                 )
 
+                # Добавляем фильтр по активным каналам, если channel_ids не заданы
+                # или фильтр по конкретным channel_ids, если они переданы
                 if channel_ids:
                     logger.info(f"{log_prefix} Анализ для каналов: {channel_ids}")
                     stmt = stmt.where(Post.channel_id.in_(channel_ids))
-                else:
-                    logger.info(f"{log_prefix} Анализ для всех активных каналов (если даты не указаны).")
-                    if not start_date_iso and not end_date_iso: 
-                         active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery()
-                         stmt = stmt.join(active_channels_subquery, Post.channel_id == active_channels_subquery.c.id)
+                else: # Если channel_ids не переданы, берем только из активных каналов
+                    logger.info(f"{log_prefix} Анализ для всех активных каналов.")
+                    active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery()
+                    stmt = stmt.join(active_channels_subquery, Post.channel_id == active_channels_subquery.c.id)
                 
-                if start_date_iso:
-                    dt_start = datetime.fromisoformat(start_date_iso.split('T')[0]).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                    stmt = stmt.where(Post.posted_at >= dt_start)
-                    logger.info(f"{log_prefix} Применен фильтр start_date: {dt_start}")
-                if end_date_iso:
-                    dt_end_naive = datetime.fromisoformat(end_date_iso.split('T')[0])
-                    dt_end = datetime(dt_end_naive.year, dt_end_naive.month, dt_end_naive.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
-                    stmt = stmt.where(Post.posted_at <= dt_end)
-                    logger.info(f"{log_prefix} Применен фильтр end_date: {dt_end}")
-                    
                 posts_to_process_result = await db_session.execute(stmt)
                 posts_to_process = posts_to_process_result.scalars().all()
 
@@ -745,6 +656,7 @@ def analyze_posts_sentiment_task(
                 logger.info(f"{log_prefix} Найдено {len(posts_to_process)} постов для анализа в этой пачке.")
                 for post_obj in posts_to_process:
                     text_for_analysis = post_obj.caption_text if post_obj.caption_text and post_obj.caption_text.strip() else post_obj.text_content
+                    
                     if not text_for_analysis or not text_for_analysis.strip():
                         logger.info(f"{log_prefix}  Пост ID {post_obj.id} ({post_obj.link}) не имеет текста/подписи или текст пустой. Помечаем как 'neutral' без вызова LLM.")
                         post_obj.post_sentiment_label = "neutral"
@@ -753,26 +665,57 @@ def analyze_posts_sentiment_task(
                         db_session.add(post_obj)
                         analyzed_count_in_batch += 1
                         continue
+
                     logger.info(f"{log_prefix}  Анализ тональности поста ID {post_obj.id} ({post_obj.link})...")
-                    s_label, s_score = "neutral", 0.0
+                    s_label, s_score = "neutral", 0.0  # Значения по умолчанию
                     try:
                         prompt = f"Определи тональность текста (JSON: sentiment_label: [positive,negative,neutral,mixed], sentiment_score: [-1.0,1.0]):\n---\n{text_for_analysis[:settings.LLM_MAX_PROMPT_LENGTH]}\n---\nJSON_RESPONSE:"
-                        llm_response_str = await одиночный_запрос_к_llm(prompt, модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106", температура=0.2, макс_токены=60, is_json_response_expected=True)
+                        llm_response_str = await одиночный_запрос_к_llm(
+                            prompt, 
+                            модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106", 
+                            температура=0.2, 
+                            макс_токены=60, # Достаточно для JSON ответа
+                            is_json_response_expected=True
+                        )
                         if llm_response_str:
                             try:
                                 data = json.loads(llm_response_str)
                                 s_label_candidate = data.get("sentiment_label")
                                 s_score_candidate_raw = data.get("sentiment_score")
-                                if s_label_candidate in ["positive", "negative", "neutral", "mixed"]: s_label = s_label_candidate
-                                else: logger.warning(f"{log_prefix}    LLM вернул невалидный sentiment_label '{s_label_candidate}' для поста ID {post_obj.id}. Установлен 'neutral'. Ответ: {llm_response_str}"); s_label = "neutral"
-                                if isinstance(s_score_candidate_raw, (int, float)) and -1.0 <= float(s_score_candidate_raw) <= 1.0: s_score = float(s_score_candidate_raw)
-                                else: logger.warning(f"{log_prefix}    LLM вернул некорректный sentiment_score '{s_score_candidate_raw}' для поста ID {post_obj.id}. Установлен 0.0. Ответ: {llm_response_str}"); s_score = 0.0
-                                if s_label_candidate is None and s_score_candidate_raw is None : s_label = "neutral"
-                            except (json.JSONDecodeError, TypeError, ValueError) as e_json: logger.error(f"{log_prefix}    Ошибка парсинга JSON от LLM для поста ID {post_obj.id} ({type(e_json).__name__}: {e_json}). Ответ LLM: '{llm_response_str}'")
-                        else: logger.warning(f"{log_prefix}    LLM вернул пустой ответ для анализа тональности поста ID {post_obj.id}. Устанавливаем 'neutral'.")
-                    except OpenAIError as e_llm_sentiment: logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при анализе тональности поста ID {post_obj.id}: {type(e_llm_sentiment).__name__} - {e_llm_sentiment}"); continue 
-                    except Exception as e_sa_general: logger.error(f"{log_prefix}    !!! Неожиданная ошибка при анализе тональности поста ID {post_obj.id}: {type(e_sa_general).__name__} - {e_sa_general}", exc_info=True); continue
-                    post_obj.post_sentiment_label = s_label; post_obj.post_sentiment_score = s_score; post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); analyzed_count_in_batch += 1
+
+                                if s_label_candidate in ["positive", "negative", "neutral", "mixed"]:
+                                    s_label = s_label_candidate
+                                else:
+                                    logger.warning(f"{log_prefix}    LLM вернул невалидный sentiment_label '{s_label_candidate}' для поста ID {post_obj.id}. Установлен 'neutral'. Ответ: {llm_response_str}")
+                                    s_label = "neutral" # Фоллбэк
+                                
+                                if isinstance(s_score_candidate_raw, (int, float)) and -1.0 <= float(s_score_candidate_raw) <= 1.0:
+                                    s_score = float(s_score_candidate_raw)
+                                else:
+                                    logger.warning(f"{log_prefix}    LLM вернул некорректный sentiment_score '{s_score_candidate_raw}' для поста ID {post_obj.id}. Установлен 0.0. Ответ: {llm_response_str}")
+                                    s_score = 0.0 # Фоллбэк
+                                    if s_label_candidate is None and s_score_candidate_raw is None : # Если LLM вернул пустой JSON или невалидную структуру
+                                        s_label = "neutral" # Убедимся, что и метка нейтральная
+                                        
+                            except (json.JSONDecodeError, TypeError, ValueError) as e_json:
+                                logger.error(f"{log_prefix}    Ошибка парсинга JSON от LLM для поста ID {post_obj.id} ({type(e_json).__name__}: {e_json}). Ответ LLM: '{llm_response_str}'")
+                                # Оставляем s_label="neutral", s_score=0.0
+                        else:
+                            logger.warning(f"{log_prefix}    LLM вернул пустой ответ для анализа тональности поста ID {post_obj.id}. Устанавливаем 'neutral'.")
+                            # s_label="neutral", s_score=0.0 уже установлены по умолчанию
+                    except OpenAIError as e_llm_sentiment:
+                        logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при анализе тональности поста ID {post_obj.id}: {type(e_llm_sentiment).__name__} - {e_llm_sentiment}")
+                        # Пропускаем этот пост, не меняем метку (останется NULL для следующей попытки)
+                        continue 
+                    except Exception as e_sa_general:
+                        logger.error(f"{log_prefix}    !!! Неожиданная ошибка при анализе тональности поста ID {post_obj.id}: {type(e_sa_general).__name__} - {e_sa_general}", exc_info=True)
+                        continue # Пропускаем этот пост
+
+                    post_obj.post_sentiment_label = s_label
+                    post_obj.post_sentiment_score = s_score
+                    post_obj.updated_at = datetime.now(timezone.utc)
+                    db_session.add(post_obj)
+                    analyzed_count_in_batch += 1
                     logger.info(f"{log_prefix}    Тональность поста ID {post_obj.id}: {s_label} ({s_score:.2f}) сохранена.")
                 
                 if analyzed_count_in_batch > 0:
@@ -782,11 +725,7 @@ def analyze_posts_sentiment_task(
             return f"Анализ тональности для пачки завершен. Обработано: {analyzed_count_in_batch} постов."
         except Exception as e_async_main:
             logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в _async_logic: {type(e_async_main).__name__} - {e_async_main}", exc_info=True)
-            raise
-        finally: 
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
-                await local_engine.dispose()
+            raise # Перевыбрасываем для обработки внешней логикой задачи
 
     try:
         result_message = asyncio.run(_async_logic())
@@ -798,6 +737,7 @@ def analyze_posts_sentiment_task(
         logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_main).__name__} - {e_task_main}", exc_info=True)
         try:
             if self.request.retries < self.max_retries:
+                # Используем стандартную задержку для ретрая
                 raise self.retry(exc=e_task_main, countdown=int(self.default_retry_delay * (2 ** self.request.retries)))
             else:
                 logger.error(f"{log_prefix} Celery: Max retries ({self.max_retries}) достигнуто для таска {self.request.id}.")
@@ -808,64 +748,85 @@ def analyze_posts_sentiment_task(
 
 @celery_instance.task(name="tasks.analyze_single_comment_ai_features", bind=True, max_retries=2, default_retry_delay=60 * 2)
 def analyze_single_comment_ai_features_task(self, comment_id: int):
-    task_start_time = time.time()
-    log_prefix = "[AICommentFeaturesMock]" # Изменили префикс для ясности
-    logger.info(f"{log_prefix} Запущена 'заглушка' для анализа comment_id: {comment_id} (Task ID: {self.request.id}). LLM ВЫЗОВ ОТКЛЮЧЕН.")
-    
-    local_engine = None 
-    
+    task_start_time = time.time(); log_prefix = "[AICommentAnalysis]"; logger.info(f"{log_prefix} Запущен анализ для comment_id: {comment_id} (Task ID: {self.request.id})")
+    if not settings.OPENAI_API_KEY:
+        logger.error(f"{log_prefix} Ошибка: OPENAI_API_KEY не настроен для comment_id: {comment_id}.")
+        return f"Config error: OpenAI Key for comment_id: {comment_id}"
     async def _async_analyze_comment_logic():
-        nonlocal local_engine
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
-            if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory_Task = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
+            async with get_async_session_context_manager() as db_session:
+                comment_stmt = select(Comment).where(Comment.id == comment_id); comment_result = await db_session.execute(comment_stmt); comment = comment_result.scalar_one_or_none()
+                if not comment:
+                    logger.warning(f"{log_prefix} Комментарий с ID {comment_id} не найден.")
+                    return f"Comment ID {comment_id} not found."
+                text_to_analyze = comment.text_content or ""
+                if comment.caption_text:
+                    text_to_analyze = f"{text_to_analyze}\n[Подпись к медиа]: {comment.caption_text}".strip()
+                if not text_to_analyze:
+                    logger.info(f"{log_prefix} Комментарий ID {comment_id} не содержит текста. Помечаем как обработанный.")
+                    update_stmt_empty = update(Comment).where(Comment.id == comment_id).values(ai_analysis_completed_at=datetime.now(timezone.utc), extracted_topics=[], extracted_problems=[], extracted_questions=[], extracted_suggestions=[])
+                    await db_session.execute(update_stmt_empty); await db_session.commit()
+                    return f"Comment ID {comment_id} has no text to analyze."
+                prompt_template = """Ты — продвинутый AI-аналитик. Тебе будет предоставлен текст одного комментария из Telegram-канала. Твоя задача — внимательно проанализировать этот комментарий и вернуть результат в формате JSON со следующими ключами:
+- "topics": список из 1-3 основных тем или предметов обсуждения, затронутых в комментарии (строки). Если тем нет, верни пустой список.
+- "problems": список из 1-3 явных проблем, жалоб или негативных моментов, указанных в комментарии (строки). Если проблем нет, верни пустой список.
+- "questions": список из 1-3 четко сформулированных вопросов, заданных в комментарии (строки). Если вопросов нет, верни пустой список.
+- "suggestions": список из 1-3 конструктивных предложений или идей, высказанных в комментарии (строки). Если предложений нет, верни пустой список.
 
-            async with LocalAsyncSessionFactory_Task() as db_session:
-                # Просто проверяем существование комментария по ID
-                comment_exists_id = await db_session.scalar(
-                    select(Comment.id).where(Comment.id == comment_id)
-                )
+Убедись, что твой ответ — это СТРОГО JSON и ничего больше. Не добавляй никаких пояснений до или после JSON.
+Пример формата JSON:
+{
+  "topics": ["обновление ПО", "пользовательский интерфейс"],
+  "problems": ["приложение часто вылетает после обновления"],
+  "questions": ["когда выйдет исправление?"],
+  "suggestions": ["добавить кнопку отмены последнего действия"]
+}
+Если каких-то элементов нет, соответствующий ключ должен содержать пустой список. Например:
+{
+  "topics": ["погода"],
+  "problems": [],
+  "questions": [],
+  "suggestions": []
+}
 
-                if not comment_exists_id: # Если scalar вернул None (комментарий не найден)
-                    logger.warning(f"{log_prefix} Комментарий с ID {comment_id} не найден. Ничего не делаем.")
-                    return f"Comment ID {comment_id} not found for mock processing."
-
-                # Просто помечаем комментарий как "проанализированный" (без вызова LLM)
-                # Поля extracted_topics и т.д. устанавливаются в пустые списки
-                update_values = {
-                    "ai_analysis_completed_at": datetime.now(timezone.utc),
-                    "extracted_topics": [], 
-                    "extracted_problems": [],
-                    "extracted_questions": [],
-                    "extracted_suggestions": []
-                }
-                update_stmt = update(Comment).where(Comment.id == comment_id).values(**update_values)
-                await db_session.execute(update_stmt)
-                await db_session.commit()
-                logger.info(f"{log_prefix} Комментарий ID {comment_id} помечен как обработанный (LLM вызов пропущен).")
-                return f"Comment ID {comment_id} mock-processed (LLM call skipped)."
-
+Текст комментария для анализа:
+---
+{comment_text}
+---
+JSON_RESPONSE:"""
+                prompt = prompt_template.format(comment_text=text_to_analyze[:settings.LLM_MAX_PROMPT_LENGTH or 3800])
+                llm_response_str = await одиночный_запрос_к_llm(prompt, модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106", температура=0.2, макс_токены=350, is_json_response_expected=True)
+                if not llm_response_str:
+                    logger.error(f"{log_prefix} Нет ответа от LLM для comment_id {comment_id}.")
+                    return f"No LLM response for comment ID {comment_id}."
+                try:
+                    if llm_response_str.strip().startswith("```json"):
+                        llm_response_str = llm_response_str.split("```json", 1)[1].rsplit("```", 1)[0].strip()
+                    elif llm_response_str.strip().startswith("```"):
+                        llm_response_str = llm_response_str.split("```",1)[1].rsplit("```",1)[0].strip()
+                    analysis_data = json.loads(llm_response_str); required_keys = {"topics": list, "problems": list, "questions": list, "suggestions": list}
+                    valid_structure = isinstance(analysis_data, dict) and all(key in analysis_data and isinstance(analysis_data[key], req_type) for key, req_type in required_keys.items())
+                    if not valid_structure:
+                        logger.error(f"{log_prefix} Некорректная структура JSON от LLM для comment_id {comment_id}. Ответ: {llm_response_str}")
+                        return f"Invalid JSON structure for comment ID {comment_id}."
+                    update_values = {"extracted_topics": analysis_data.get("topics", []), "extracted_problems": analysis_data.get("problems", []), "extracted_questions": analysis_data.get("questions", []), "extracted_suggestions": analysis_data.get("suggestions", []), "ai_analysis_completed_at": datetime.now(timezone.utc)}
+                    update_stmt = update(Comment).where(Comment.id == comment_id).values(**update_values)
+                    await db_session.execute(update_stmt); await db_session.commit()
+                    logger.info(f"{log_prefix} Успешно проанализирован comment_id {comment_id}.")
+                    return f"Successfully analyzed comment ID {comment_id}."
+                except json.JSONDecodeError:
+                    logger.error(f"{log_prefix} Ошибка декодирования JSON от LLM для comment_id {comment_id}. Ответ: {llm_response_str}", exc_info=True)
+                    return f"JSONDecodeError for comment ID {comment_id}."
+                except Exception as e_proc:
+                    logger.error(f"{log_prefix} Ошибка обработки ответа LLM для comment_id {comment_id}: {type(e_proc).__name__} - {e_proc}", exc_info=True)
+                    return f"Error processing LLM response for comment ID {comment_id}."
         except Exception as e_general_comment_analysis:
-            logger.error(f"{log_prefix} Общая ошибка при mock-обработке comment_id {comment_id}: {type(e_general_comment_analysis).__name__} - {e_general_comment_analysis}", exc_info=True)
-            raise 
-        finally:
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally (comment_id: {comment_id}).")
-                await local_engine.dispose()
-
+            logger.error(f"{log_prefix} Общая ошибка при анализе comment_id {comment_id}: {type(e_general_comment_analysis).__name__} - {e_general_comment_analysis}", exc_info=True)
+            raise
     try:
-        result_message = asyncio.run(_async_analyze_comment_logic())
-        task_duration = time.time() - task_start_time
-        logger.info(f"{log_prefix} Celery таск '{self.name}' (заглушка) завершен за {task_duration:.2f} сек. Результат: {result_message}")
-        return result_message
+        result_message = asyncio.run(_async_analyze_comment_logic()); task_duration = time.time() - task_start_time; logger.info(f"Celery таск '{self.name}' (comment_id: {comment_id}) завершен за {task_duration:.2f} сек. Результат: {result_message}"); return result_message
     except Exception as e_task_level:
-        task_duration = time.time() - task_start_time; logger.error(f"{log_prefix} !!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (заглушка) (comment_id: {comment_id}) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
+        task_duration = time.time() - task_start_time; logger.error(f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (comment_id: {comment_id}) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
         try:
             if self.request.retries < self.max_retries:
                 default_retry_delay_val = self.default_retry_delay if isinstance(self.default_retry_delay, (int, float)) else 120
@@ -880,126 +841,74 @@ def analyze_single_comment_ai_features_task(self, comment_id: int):
             raise e_task_level
 
 @celery_instance.task(name="tasks.enqueue_comments_for_ai_feature_analysis", bind=True)
-def enqueue_comments_for_ai_feature_analysis_task(
-    self, 
-    limit_comments_to_queue: Optional[int] = None, 
-    older_than_hours: Optional[int] = None, 
-    channel_id_filter: Optional[int] = None, 
-    process_only_recent_hours: Optional[int] = None, 
-    comment_ids_to_process: Optional[List[int]] = None,
-    start_date_iso: Optional[str] = None, 
-    end_date_iso: Optional[str] = None   
-):
-    actual_limit_comments_to_queue = limit_comments_to_queue if limit_comments_to_queue is not None else settings.COMMENT_ENQUEUE_BATCH_SIZE
-    task_start_time = time.time()
-    log_prefix_parts = ["[AICommentQueue"]
-    if channel_id_filter: log_prefix_parts.append(f"Ch:{channel_id_filter}")
-    if start_date_iso: log_prefix_parts.append(f"Start:{start_date_iso}")
-    if end_date_iso: log_prefix_parts.append(f"End:{end_date_iso}")
-    if comment_ids_to_process: log_prefix_parts.append(f"IDs:{len(comment_ids_to_process)}")
-    if older_than_hours is not None: log_prefix_parts.append(f"OlderThanH:{older_than_hours}")
-    if process_only_recent_hours is not None: log_prefix_parts.append(f"RecentH:{process_only_recent_hours}")
-    log_prefix = "".join(log_prefix_parts) + "]"
-
-    logger.info(f"{log_prefix} Запуск задачи. Лимит пачки (если не заданы ID): {actual_limit_comments_to_queue} (Task ID: {self.request.id})")
-    
+def enqueue_comments_for_ai_feature_analysis_task(self, limit_comments_to_queue: int = 100, older_than_hours: Optional[int] = None, channel_id_filter: Optional[int] = None, process_only_recent_hours: Optional[int] = None, comment_ids_to_process: Optional[List[int]] = None):
+    task_start_time = time.time(); log_prefix = "[AICommentQueue]"; logger.info(f"{log_prefix} Запуск задачи. Лимит: {limit_comments_to_queue}, Старше часов: {older_than_hours}, Канал ID: {channel_id_filter}, Только за X часов: {process_only_recent_hours}, Список ID: {'Да (' + str(len(comment_ids_to_process)) + ')' if comment_ids_to_process else 'Нет'} (Task ID: {self.request.id})")
     enqueued_count = 0
-    local_engine = None 
-
     async def _async_enqueue_logic():
-        nonlocal enqueued_count 
-        nonlocal local_engine   
+        nonlocal enqueued_count
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
-            if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
-                ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
-            local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
-            LocalAsyncSessionFactory_Task = sessionmaker(
-                bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
-            )
-            logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
-
-            async with LocalAsyncSessionFactory_Task() as db_session: 
+            async with get_async_session_context_manager() as db_session:
                 comment_ids_to_enqueue: List[int] = []
                 if comment_ids_to_process is not None:
                     logger.info(f"{log_prefix} Режим обработки конкретных ID комментариев: {len(comment_ids_to_process)} шт.")
                     if comment_ids_to_process:
-                        stmt_filter_ids = select(Comment.id)\
-                            .where(Comment.id.in_(comment_ids_to_process))\
-                            .where(Comment.text_content.isnot(None))\
-                            .where(Comment.text_content != "")\
-                            .where(Comment.ai_analysis_completed_at.is_(None))
-                        
-                        filtered_ids_result = await db_session.execute(stmt_filter_ids)
-                        comment_ids_to_enqueue = filtered_ids_result.scalars().all()
-                        logger.info(f"{log_prefix} Из переданных {len(comment_ids_to_process)} ID, {len(comment_ids_to_enqueue)} подходят для AI-анализа и будут поставлены в очередь.")
-                    else: 
+                        stmt_filter_ids = select(Comment.id).where(Comment.id.in_(comment_ids_to_process)).where(Comment.text_content.isnot(None)).where(Comment.text_content != "").where(Comment.ai_analysis_completed_at.is_(None))
+                        filtered_ids_result = await db_session.execute(stmt_filter_ids); comment_ids_to_enqueue = filtered_ids_result.scalars().all()
+                        logger.info(f"{log_prefix} Из переданных ID, {len(comment_ids_to_enqueue)} подходят для анализа.")
+                    else:
                         comment_ids_to_enqueue = []
-                else: 
+                else:
                     stmt = select(Comment.id).where(Comment.text_content.isnot(None)).where(Comment.text_content != "")
-                    
-                    if start_date_iso or end_date_iso or channel_id_filter: 
-                        stmt = stmt.join(Post, Comment.post_id == Post.id)
-                        if channel_id_filter:
-                            stmt = stmt.where(Post.channel_id == channel_id_filter)
-                        
-                        if start_date_iso:
-                            dt_start = datetime.fromisoformat(start_date_iso.split('T')[0]).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                            stmt = stmt.where(Post.posted_at >= dt_start) 
-                            logger.info(f"{log_prefix} Применен фильтр start_date для постов: {dt_start}")
-                        if end_date_iso:
-                            dt_end_naive = datetime.fromisoformat(end_date_iso.split('T')[0])
-                            dt_end = datetime(dt_end_naive.year, dt_end_naive.month, dt_end_naive.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
-                            stmt = stmt.where(Post.posted_at <= dt_end) 
-                            logger.info(f"{log_prefix} Применен фильтр end_date для постов: {dt_end}")
-                    
                     if process_only_recent_hours is not None and process_only_recent_hours > 0:
-                        time_threshold_recent = datetime.now(timezone.utc) - timedelta(hours=process_only_recent_hours); stmt = stmt.where(Comment.commented_at >= time_threshold_recent); stmt = stmt.where(Comment.ai_analysis_completed_at.is_(None)); stmt = stmt.order_by(Comment.commented_at.desc()); logger.info(f"{log_prefix} Режим недавних: за {process_only_recent_hours}ч.")
-                    else: 
+                        time_threshold_recent = datetime.now(timezone.utc) - timedelta(hours=process_only_recent_hours)
+                        stmt = stmt.where(Comment.commented_at >= time_threshold_recent)
+                        stmt = stmt.where(Comment.ai_analysis_completed_at.is_(None))
+                        stmt = stmt.order_by(Comment.commented_at.desc())
+                        logger.info(f"{log_prefix} Режим недавних: за {process_only_recent_hours}ч.")
+                    else:
                         if older_than_hours is not None:
-                            time_threshold_older = datetime.now(timezone.utc) - timedelta(hours=older_than_hours); stmt = stmt.where((Comment.ai_analysis_completed_at.is_(None)) | (Comment.ai_analysis_completed_at < time_threshold_older))
+                            time_threshold_older = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+                            stmt = stmt.where((Comment.ai_analysis_completed_at.is_(None)) | (Comment.ai_analysis_completed_at < time_threshold_older))
                         else:
                             stmt = stmt.where(Comment.ai_analysis_completed_at.is_(None))
-                        stmt = stmt.order_by(Comment.commented_at.asc()) 
-                        logger.info(f"{log_prefix} Режим бэклога или общего анализа (с возможным фильтром по датам постов).")
-                    
-                    stmt = stmt.limit(actual_limit_comments_to_queue)
-                    comment_ids_result = await db_session.execute(stmt)
-                    comment_ids_to_enqueue = comment_ids_result.scalars().all()
-
+                        stmt = stmt.order_by(Comment.commented_at.asc())
+                        logger.info(f"{log_prefix} Режим бэклога.")
+                    if channel_id_filter:
+                        stmt = stmt.join(Post, Comment.post_id == Post.id).where(Post.channel_id == channel_id_filter)
+                    stmt = stmt.limit(limit_comments_to_queue)
+                    comment_ids_result = await db_session.execute(stmt); comment_ids_to_enqueue = comment_ids_result.scalars().all()
                 if not comment_ids_to_enqueue:
-                    logger.info(f"{log_prefix} Не найдено комментариев для очереди по заданным критериям.")
+                    logger.info(f"{log_prefix} Не найдено комментариев для очереди.")
                     return "No comments found to queue."
-                
-                logger.info(f"{log_prefix} Найдено {len(comment_ids_to_enqueue)} комментариев для очереди. Запускаю задачи детального анализа...")
+                logger.info(f"{log_prefix} Найдено {len(comment_ids_to_enqueue)} комментариев для очереди. Запускаю задачи...")
                 for comment_id_to_process in comment_ids_to_enqueue:
                     analyze_single_comment_ai_features_task.delay(comment_id_to_process)
                     enqueued_count += 1
-                return f"Successfully enqueued {enqueued_count} comments for detailed AI analysis."
+                return f"Successfully enqueued {enqueued_count} comments."
         except Exception as e_enqueue:
             logger.error(f"{log_prefix} Ошибка в _async_enqueue_logic: {type(e_enqueue).__name__} - {e_enqueue}", exc_info=True)
             raise
-        finally: 
-            if local_engine:
-                logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
-                await local_engine.dispose()
-
     try:
-        result_message = asyncio.run(_async_enqueue_logic())
-        task_duration = time.time() - task_start_time
-        logger.info(f"{log_prefix} Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
-        return result_message
+        result_message = asyncio.run(_async_enqueue_logic()); task_duration = time.time() - task_start_time; logger.info(f"Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}"); return result_message
     except Exception as e_task_level:
-        task_duration = time.time() - task_start_time; logger.error(f"{log_prefix} !!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True); raise e_task_level
+        task_duration = time.time() - task_start_time; logger.error(f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True); raise e_task_level
 
+# Убедись, что эти импорты есть в начале файла app/tasks.py
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker, aliased
+# ... остальные твои импорты ...
+
+# Убедись, что эти импорты есть в начале файла app/tasks.py
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker, aliased
+# ... остальные твои импорты ...
 
 @celery_instance.task(name="tasks.advanced_data_refresh", bind=True, max_retries=2, default_retry_delay=60 * 10)
 def advanced_data_refresh_task(
     self,
     channel_ids: Optional[List[int]] = None,
     post_refresh_mode_str: str = PostRefreshMode.NEW_ONLY.value,
-    post_refresh_days: Optional[int] = None, 
+    post_refresh_days: Optional[int] = None, # <--- ИСПРАВЛЕНО: убрана лишняя ']'
     post_refresh_start_date_iso: Optional[str] = None,
     post_limit_per_channel: int = 100,
     update_existing_posts_info: bool = False,
@@ -1016,18 +925,15 @@ def advanced_data_refresh_task(
     
     post_refresh_mode_enum: PostRefreshMode
     comment_refresh_mode_enum: CommentRefreshMode
-    post_refresh_start_date_dt: Optional[datetime] = None # Переименовано для ясности
+    post_refresh_start_date: Optional[datetime] = None
     
     try:
         post_refresh_mode_enum = PostRefreshMode(post_refresh_mode_str)
         comment_refresh_mode_enum = CommentRefreshMode(comment_refresh_mode_str)
         
         if post_refresh_start_date_iso:
-            # Убедимся, что парсим только дату, время будет 00:00:00 UTC
-            parsed_date_obj = date.fromisoformat(post_refresh_start_date_iso.split('T')[0])
-            post_refresh_start_date_dt = datetime(parsed_date_obj.year, parsed_date_obj.month, parsed_date_obj.day, tzinfo=timezone.utc)
-            logger.info(f"{log_prefix} post_refresh_start_date_dt установлен: {post_refresh_start_date_dt.isoformat()}")
-
+            parsed_date_obj = date.fromisoformat(post_refresh_start_date_iso)
+            post_refresh_start_date = datetime(parsed_date_obj.year, parsed_date_obj.month, parsed_date_obj.day, tzinfo=timezone.utc)
     except ValueError as e:
         logger.error(f"{log_prefix} Ошибка преобразования параметров: {e}")
         self.update_state(state='FAILURE', meta={'current_step': 'Ошибка параметров задачи', 'progress': 100, 'error': str(e)})
@@ -1046,10 +952,10 @@ def advanced_data_refresh_task(
         tg_client = None
         local_engine = None 
         processed_channels_count = 0
-        total_new_posts_task = 0
-        total_updated_posts_info_task = 0 # Общий счетчик постов, у которых обновилась информация
-        total_new_comments_collected_task = 0
-        newly_added_comment_ids_for_ai_task: List[int] = [] # Только ID новых комментов для AI
+        total_new_posts = 0
+        total_updated_posts_info = 0
+        total_new_comments_collected = 0
+        newly_added_or_updated_comment_ids_inner: List[int] = []
         
         try:
             ASYNC_DB_URL = settings.DATABASE_URL 
@@ -1093,60 +999,37 @@ def advanced_data_refresh_task(
                 logger.info(f"{log_prefix} Найдено {total_channels_to_process} каналов для обработки.")
                 base_progress = 15
 
-                for idx, channel_db_obj in enumerate(channels_db_list):
+                for idx, channel_db in enumerate(channels_db_list):
                     processed_channels_count += 1
                     channel_progress = base_progress + int(((idx + 1) / total_channels_to_process) * 70) 
-                    self.update_state(state='PROGRESS', meta={'current_step': f'Канал: {channel_db_obj.title} ({idx+1}/{total_channels_to_process})', 'progress': channel_progress, 'channel_id': channel_db_obj.id, 'channel_title': channel_db_obj.title})
-                    logger.info(f"{log_prefix} Обработка канала: '{channel_db_obj.title}' (ID: {channel_db_obj.id})")
-                    
-                    # Счетчики для текущего канала
-                    channel_new_posts = 0
-                    channel_updated_posts_info = 0
-                    channel_new_comments = 0
+                    self.update_state(state='PROGRESS', meta={'current_step': f'Канал: {channel_db.title} ({idx+1}/{total_channels_to_process})', 'progress': channel_progress, 'channel_id': channel_db.id, 'channel_title': channel_db.title})
+                    logger.info(f"{log_prefix} Обработка канала: '{channel_db.title}' (ID: {channel_db.id})")
                     
                     try:
-                        tg_channel_entity = await tg_client.get_entity(channel_db_obj.id)
+                        tg_channel_entity = await tg_client.get_entity(channel_db.id)
                         
-                        posts_to_scan_comments_for: List[Post] = [] 
-                        
-                        latest_post_id_tg_for_channel_update = channel_db_obj.last_processed_post_id or 0
+                        current_posts_for_comment_scan: List[Post] = []
+                        current_newly_created_posts: List[Post] = [] # Будет пуст для UPDATE_STATS_ONLY
+                        current_new_p_ch: int = 0 # Будет 0 для UPDATE_STATS_ONLY
+                        current_upd_p_ch: int = 0
+                        current_last_id_tg: int = channel_db.last_processed_post_id or 0
+
+                        iter_params: Dict[str, Any] = {"entity": tg_channel_entity, "limit": None}
 
                         if post_refresh_mode_enum == PostRefreshMode.UPDATE_STATS_ONLY:
-                            logger.info(f"{log_prefix}  Режим UPDATE_STATS_ONLY для канала {channel_db_obj.title}.")
+                            logger.info(f"{log_prefix}  Режим UPDATE_STATS_ONLY для канала {channel_db.title}.")
+                            if not update_existing_posts_info: # Для этого режима флаг должен быть True
+                                logger.warning(f"{log_prefix}    Режим UPDATE_STATS_ONLY, но update_existing_posts_info=False. Статистика постов не будет принудительно обновлена из Telegram, только собраны комменты для существующих.")
                             
-                            comment_count_subquery = (
-                                select(
-                                    Comment.post_id,
-                                    func.count(Comment.id).label("db_comment_count")
-                                )
-                                .group_by(Comment.post_id)
-                                .subquery("comment_counts")
-                            )
-                            db_posts_stmt = (
-                                select(Post, func.coalesce(comment_count_subquery.c.db_comment_count, 0).label("db_comment_count_for_post"))
-                                .outerjoin(comment_count_subquery, Post.id == comment_count_subquery.c.post_id)
-                                .where(Post.channel_id == channel_db_obj.id)
-                                .order_by(Post.telegram_post_id.desc()) # Сначала самые новые для обновления
-                            )
+                            db_posts_stmt = select(Post).where(Post.channel_id == channel_db.id).order_by(Post.telegram_post_id.desc())
+                            # Можно добавить .limit(post_limit_per_channel) если постов очень много и хотим ограничить обновление
                             
-                            if post_refresh_days:
-                                date_limit = datetime.now(timezone.utc) - timedelta(days=post_refresh_days)
-                                db_posts_stmt = db_posts_stmt.where(Post.posted_at >= date_limit)
-                                logger.info(f"{log_prefix}    UPDATE_STATS_ONLY: применен фильтр по post_refresh_days ({post_refresh_days} дней)")
-                            elif post_refresh_start_date_dt:
-                                db_posts_stmt = db_posts_stmt.where(Post.posted_at >= post_refresh_start_date_dt)
-                                logger.info(f"{log_prefix}    UPDATE_STATS_ONLY: применен фильтр по post_refresh_start_date ({post_refresh_start_date_dt.isoformat()})")
-                            
-                            if post_limit_per_channel and post_limit_per_channel > 0 :
-                                db_posts_stmt = db_posts_stmt.limit(post_limit_per_channel)
-                                logger.info(f"{log_prefix}    UPDATE_STATS_ONLY: применен лимит {post_limit_per_channel} постов из БД для обновления.")
+                            db_posts_result = await db.execute(db_posts_stmt)
+                            db_posts_list = db_posts_result.scalars().unique().all()
 
-                            db_posts_data_list_result = await db.execute(db_posts_stmt)
-                            db_posts_data_list = db_posts_data_list_result.all() 
-
-                            if db_posts_data_list:
-                                telegram_post_ids_to_fetch = [p_data[0].telegram_post_id for p_data in db_posts_data_list]
-                                logger.info(f"{log_prefix}    Найдено {len(db_posts_data_list)} постов в БД для канала {channel_db_obj.title} для обновления статистики (согласно фильтрам).")
+                            if db_posts_list:
+                                telegram_post_ids_to_fetch = [p.telegram_post_id for p in db_posts_list]
+                                logger.info(f"{log_prefix}    Найдено {len(db_posts_list)} постов в БД для канала {channel_db.title} для обновления статистики.")
                                 
                                 batch_size = 100 
                                 for i in range(0, len(telegram_post_ids_to_fetch), batch_size):
@@ -1156,146 +1039,105 @@ def advanced_data_refresh_task(
                                     try:
                                         messages_or_none = await tg_client.get_messages(tg_channel_entity, ids=batch_ids)
                                         if messages_or_none:
-                                            fetched_tg_messages = [msg for msg in messages_or_none if msg is not None and not isinstance(msg, MessageService)] 
+                                            fetched_tg_messages = [msg for msg in messages_or_none if msg is not None]
                                     except Exception as e_get_msgs_batch:
-                                        logger.error(f"{log_prefix}    Ошибка при пакетном получении сообщений по ID для канала {channel_db_obj.id}: {e_get_msgs_batch}")
+                                        logger.error(f"{log_prefix}    Ошибка при пакетном получении сообщений по ID для канала {channel_db.id}: {e_get_msgs_batch}")
                                         continue 
 
                                     if fetched_tg_messages:
-                                        logger.info(f"{log_prefix}      Получено {len(fetched_tg_messages)} НЕ сервисных сообщений из Telegram для обновления.")
-                                        
-                                        db_posts_map_with_counts = {
-                                            p_data[0].telegram_post_id: (p_data[0], p_data[1]) 
-                                            for p_data in db_posts_data_list 
-                                            if p_data[0].telegram_post_id in batch_ids
-                                        }
+                                        logger.info(f"{log_prefix}      Получено {len(fetched_tg_messages)} сообщений из Telegram для обновления.")
+                                        db_posts_map = {p.telegram_post_id: p for p in db_posts_list if p.telegram_post_id in batch_ids}
 
                                         for tg_message in fetched_tg_messages:
-                                            if tg_message.id in db_posts_map_with_counts:
-                                                post_in_db, db_comment_count = db_posts_map_with_counts[tg_message.id]
+                                            if tg_message.id in db_posts_map:
+                                                post_in_db = db_posts_map[tg_message.id]
                                                 
-                                                api_comments_count_tg = tg_message.replies.replies if tg_message.replies and tg_message.replies.replies is not None else 0
+                                                api_comments_count = tg_message.replies.replies if tg_message.replies and tg_message.replies.replies is not None else 0
                                                 
-                                                info_changed_for_post = False
-                                                if update_existing_posts_info: 
-                                                    if post_in_db.views_count != tg_message.views: info_changed_for_post = True; post_in_db.views_count = tg_message.views
-                                                    new_reactions = await _process_reactions_for_db(tg_message.reactions)
-                                                    if post_in_db.reactions != new_reactions : info_changed_for_post = True; post_in_db.reactions = new_reactions
-                                                    if post_in_db.forwards_count != tg_message.forwards: info_changed_for_post = True; post_in_db.forwards_count = tg_message.forwards
-                                                    new_edited_at = tg_message.edit_date.replace(tzinfo=timezone.utc) if tg_message.edit_date else None
-                                                    if post_in_db.edited_at != new_edited_at: info_changed_for_post = True; post_in_db.edited_at = new_edited_at
-                                                    
-                                                    new_text, new_caption = (None, tg_message.text) if tg_message.media and tg_message.text else (tg_message.text if not tg_message.media else None, None)
-                                                    if post_in_db.text_content != new_text: info_changed_for_post = True; post_in_db.text_content = new_text
-                                                    if post_in_db.caption_text != new_caption: info_changed_for_post = True; post_in_db.caption_text = new_caption
-                                                    
-                                                    new_media_type, new_media_info = await _process_media_for_db(tg_message.media)
-                                                    if post_in_db.media_type != new_media_type or post_in_db.media_content_info != new_media_info:
-                                                        info_changed_for_post = True; post_in_db.media_type = new_media_type; post_in_db.media_content_info = new_media_info
-                                                    
-                                                    if (tg_message.pinned or False) != post_in_db.is_pinned: info_changed_for_post = True; post_in_db.is_pinned = tg_message.pinned or False
-                                                    if tg_message.post_author != post_in_db.author_signature: info_changed_for_post = True; post_in_db.author_signature = tg_message.post_author
-                                                    
-                                                    if info_changed_for_post:
-                                                        channel_updated_posts_info +=1
-                                                        post_in_db.updated_at = datetime.now(timezone.utc)
+                                                post_in_db.views_count = tg_message.views
+                                                post_in_db.reactions = await _process_reactions_for_db(tg_message.reactions)
+                                                post_in_db.forwards_count = tg_message.forwards
+                                                post_in_db.edited_at = tg_message.edit_date.replace(tzinfo=timezone.utc) if tg_message.edit_date else None
+                                                post_in_db.comments_count = api_comments_count # Обновляем из TG
                                                 
-                                                # Обновляем счетчик комментов в Post всегда, если он отличается от TG
-                                                if post_in_db.comments_count != api_comments_count_tg:
-                                                    logger.debug(f"{log_prefix}      Пост TG ID {post_in_db.telegram_post_id}: comments_count обновлен с {post_in_db.comments_count} на {api_comments_count_tg} из Telegram API.")
-                                                    post_in_db.comments_count = api_comments_count_tg
-                                                    if not info_changed_for_post : # Если только счетчик комментов изменился
-                                                        post_in_db.updated_at = datetime.now(timezone.utc)
-                                                        # Не считаем это как channel_updated_posts_info, если update_existing_posts_info=False
-                                                        # Но если update_existing_posts_info=True, то это уже посчитано выше
-                                                
-                                                db.add(post_in_db) 
+                                                # Обновляем основной контент тоже, так как он мог измениться
+                                                post_in_db.text_content, post_in_db.caption_text = (None, tg_message.text) if tg_message.media and tg_message.text else (tg_message.text if not tg_message.media else None, None)
+                                                post_in_db.media_type, post_in_db.media_content_info = await _process_media_for_db(tg_message.media)
+                                                post_in_db.is_pinned = tg_message.pinned or False
+                                                post_in_db.author_signature = tg_message.post_author
+                                                post_in_db.updated_at = datetime.now(timezone.utc)
 
-                                                if api_comments_count_tg > db_comment_count:
-                                                    logger.info(f"{log_prefix}      Пост TG ID {post_in_db.telegram_post_id}: счетчик комм. увеличился (API: {api_comments_count_tg}, DB было: {db_comment_count}). Ставим на сбор недостающих.")
-                                                    posts_to_scan_comments_for.append(post_in_db)
-                                                elif comment_refresh_mode_enum == CommentRefreshMode.ADD_NEW_TO_EXISTING and api_comments_count_tg > 0 :
-                                                    # Если режим "добавлять новые к существующим", и в API есть комменты (даже если счетчик не вырос),
-                                                    # то стоит проверить, не появились ли ID, которых нет у нас.
-                                                    # Это может произойти, если кто-то удалил старый коммент и добавил новый, и общее число осталось тем же.
-                                                    logger.info(f"{log_prefix}      Пост TG ID {post_in_db.telegram_post_id}: счетчик комм. не вырос ({api_comments_count_tg}), но режим ADD_NEW_TO_EXISTING. Ставим на проверку новых ID.")
-                                                    posts_to_scan_comments_for.append(post_in_db)
-                                                else:
-                                                    logger.debug(f"{log_prefix}      Пост TG ID {post_in_db.telegram_post_id}: счетчик комм. не увеличился (API: {api_comments_count_tg}, DB было: {db_comment_count}). Сбор недостающих комм. не требуется.")
+                                                db.add(post_in_db)
+                                                current_posts_for_comment_scan.append(post_in_db)
+                                                current_upd_p_ch += 1
+                                        
+                                        # Логгируем после обработки каждой пачки, если были обновления в ней
+                                        # Это может быть много логов, если пачек много. Возможно, лучше один лог в конце.
+                                        # logger.info(f"{log_prefix}      Обновлена статистика (в текущей пачке) для {current_upd_p_ch - temp_upd_count_before_batch} постов.")
                             else:
-                                logger.info(f"{log_prefix}    Нет постов в БД для канала {channel_db_obj.title} для обновления статистики (согласно фильтрам).")
+                                logger.info(f"{log_prefix}    Нет постов в БД для канала {channel_db.title} для обновления статистики.")
+                            # current_new_p_ch и current_newly_created_posts остаются 0 и []
+                            # current_last_id_tg не обновляется
 
-                        else: # Режимы NEW_ONLY, LAST_N_DAYS, SINCE_DATE
-                            iter_params_helper = {"entity": tg_channel_entity, "limit": post_limit_per_channel} # Лимит для helper'а
-                            if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY:
-                                if channel_db_obj.last_processed_post_id:
-                                    iter_params_helper["min_id"] = channel_db_obj.last_processed_post_id
-                                else: # Если last_processed_post_id нет, но есть INITIAL_POST_FETCH_START_DATETIME, используем его
-                                    if settings.INITIAL_POST_FETCH_START_DATETIME:
-                                       iter_params_helper["offset_date"] = settings.INITIAL_POST_FETCH_START_DATETIME
-                                       iter_params_helper["reverse"] = True
-                                    # Если и его нет, helper будет собирать последние post_limit_per_channel постов
-                            elif post_refresh_mode_enum == PostRefreshMode.LAST_N_DAYS and post_refresh_days:
-                                iter_params_helper["offset_date"] = datetime.now(timezone.utc) - timedelta(days=post_refresh_days)
-                                iter_params_helper["reverse"] = True
-                            elif post_refresh_mode_enum == PostRefreshMode.SINCE_DATE and post_refresh_start_date_dt:
-                                iter_params_helper["offset_date"] = post_refresh_start_date_dt
-                                iter_params_helper["reverse"] = True
-                            
-                            all_processed_posts_from_helper, newly_created_posts_from_helper, num_new_p, num_upd_p, last_id_tg_helper = await _helper_fetch_and_process_posts_for_channel(
-                                tg_client, db, channel_db_obj, iter_params_helper, 
-                                update_existing_posts_info, log_prefix
-                            )
-                            channel_new_posts += num_new_p
-                            channel_updated_posts_info += num_upd_p 
-                            latest_post_id_tg_for_channel_update = max(latest_post_id_tg_for_channel_update, last_id_tg_helper)
-
-                            if comment_refresh_mode_enum == CommentRefreshMode.NEW_POSTS_ONLY:
-                                posts_to_scan_comments_for.extend(newly_created_posts_from_helper)
-                            else: # ADD_NEW_TO_EXISTING
-                                posts_to_scan_comments_for.extend(all_processed_posts_from_helper)
+                        elif post_refresh_mode_enum == PostRefreshMode.NEW_ONLY:
+                            iter_params["limit"] = post_limit_per_channel
+                            if channel_db.last_processed_post_id:
+                                iter_params["min_id"] = channel_db.last_processed_post_id
+                            current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
+                        elif post_refresh_mode_enum == PostRefreshMode.LAST_N_DAYS and post_refresh_days:
+                            iter_params["offset_date"] = datetime.now(timezone.utc) - timedelta(days=post_refresh_days)
+                            iter_params["reverse"] = True
+                            iter_params["limit"] = post_limit_per_channel
+                            current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
+                        elif post_refresh_mode_enum == PostRefreshMode.SINCE_DATE and post_refresh_start_date:
+                            iter_params["offset_date"] = post_refresh_start_date
+                            iter_params["reverse"] = True
+                            iter_params["limit"] = post_limit_per_channel
+                            current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
                         
-                        if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY and latest_post_id_tg_for_channel_update > (channel_db_obj.last_processed_post_id or 0):
-                            channel_db_obj.last_processed_post_id = latest_post_id_tg_for_channel_update
-                            db.add(channel_db_obj)
+                        total_new_posts += current_new_p_ch
+                        total_updated_posts_info += current_upd_p_ch
+                        
+                        if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY and current_last_id_tg > (channel_db.last_processed_post_id or 0):
+                            channel_db.last_processed_post_id = current_last_id_tg
+                            db.add(channel_db)
 
                         if comment_refresh_mode_enum != CommentRefreshMode.DO_NOT_REFRESH:
-                            unique_posts_for_comment_scan = []
-                            seen_post_ids_for_scan = set()
-                            for post_obj in posts_to_scan_comments_for: # posts_to_scan_comments_for теперь содержит только те, что нужно
-                                if post_obj.id not in seen_post_ids_for_scan:
-                                    unique_posts_for_comment_scan.append(post_obj)
-                                    seen_post_ids_for_scan.add(post_obj.id)
+                            channel_specific_comments_collected = 0
+                            channel_specific_new_comment_ids: List[int] = []
+                            
+                            if current_posts_for_comment_scan: 
+                                posts_to_scan_for_comments: List[Post] = []
+                                if comment_refresh_mode_enum == CommentRefreshMode.NEW_POSTS_ONLY:
+                                    posts_to_scan_for_comments = current_newly_created_posts
+                                else: # ADD_NEW_TO_EXISTING
+                                    posts_to_scan_for_comments = current_posts_for_comment_scan
 
-                            if unique_posts_for_comment_scan: 
-                                logger.info(f"{log_prefix}  Сбор комментариев для {len(unique_posts_for_comment_scan)} постов канала {channel_db_obj.id} (режим комм: {comment_refresh_mode_enum.value})...")
-                                for post_obj_to_scan in unique_posts_for_comment_scan:
-                                    num_c, new_c_ids = await _helper_fetch_and_process_comments_for_post(
-                                        tg_client, db, post_obj_to_scan, tg_channel_entity, 
-                                        comment_limit_per_post, log_prefix
-                                    )
-                                    channel_new_comments += num_c
-                                    newly_added_comment_ids_for_ai_task.extend(new_c_ids)
-                            else:
-                                logger.info(f"{log_prefix}  Нет постов для сбора комментариев в канале {channel_db_obj.id} (согласно выбранной логике).")
+                                if posts_to_scan_for_comments:
+                                    logger.info(f"{log_prefix}  Сбор комм. для {len(posts_to_scan_for_comments)} постов канала {channel_db.id} (режим: {comment_refresh_mode_enum.value})...")
+                                    for post_obj in posts_to_scan_for_comments:
+                                        num_c, new_c_ids = await _helper_fetch_and_process_comments_for_post(tg_client, db, post_obj, tg_channel_entity, comment_limit_per_post, log_prefix)
+                                        channel_specific_comments_collected += num_c
+                                        channel_specific_new_comment_ids.extend(new_c_ids)
+                                else:
+                                    logger.info(f"{log_prefix}  Нет подходящих постов для сбора комментариев в канале {channel_db.id} для режима {comment_refresh_mode_enum.value}.")
+                                    
+                            total_new_comments_collected += channel_specific_comments_collected
+                            newly_added_or_updated_comment_ids_inner.extend(channel_specific_new_comment_ids)
                         else:
-                            logger.info(f"{log_prefix}  Сбор комментариев пропущен для канала {channel_db_obj.id} (режим комм: DO_NOT_REFRESH).")
+                            logger.info(f"{log_prefix}  Сбор комментариев пропущен для канала {channel_db.id} (режим: {comment_refresh_mode_enum.value}).")
                             
                     except (ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError) as e_ch_access:
-                        logger.warning(f"{log_prefix}  Канал {channel_db_obj.id} ('{channel_db_obj.title}') недоступен: {e_ch_access}. Деактивируем.")
-                        channel_db_obj.is_active = False; db.add(channel_db_obj)
+                        logger.warning(f"{log_prefix}  Канал {channel_db.id} ('{channel_db.title if channel_db else 'N/A'}') недоступен: {e_ch_access}. Деактивируем, если объект channel_db есть.")
+                        if channel_db: channel_db.is_active = False; db.add(channel_db)
                         continue 
                     except FloodWaitError as fwe_ch:
-                        logger.warning(f"{log_prefix}  FloodWait ({fwe_ch.seconds} сек.) для канала {channel_db_obj.title}. Пропускаем канал в этом запуске.")
+                        logger.warning(f"{log_prefix}  FloodWait ({fwe_ch.seconds} сек.) для канала {channel_db.title if channel_db else 'N/A'}. Пропускаем канал в этом запуске.")
                         await asyncio.sleep(fwe_ch.seconds + 10) 
                         continue
                     except Exception as e_ch_proc:
-                        logger.error(f"{log_prefix}  Ошибка обработки канала '{channel_db_obj.title}': {type(e_ch_proc).__name__} - {e_ch_proc}", exc_info=True)
+                        logger.error(f"{log_prefix}  Ошибка обработки канала '{channel_db.title if channel_db else 'N/A'}': {type(e_ch_proc).__name__} - {e_ch_proc}", exc_info=True)
                         continue 
-                    
-                    total_new_posts_task += channel_new_posts
-                    total_updated_posts_info_task += channel_updated_posts_info
-                    total_new_comments_collected_task += channel_new_comments
                     
                     if idx < total_channels_to_process - 1: 
                         logger.debug(f"{log_prefix} Пауза 1 сек перед обработкой следующего канала.")
@@ -1303,31 +1145,22 @@ def advanced_data_refresh_task(
                 
                 await db.commit() 
                 
-                final_summary = f"Обновление завершено. Каналов обработано: {processed_channels_count}, Новых постов: {total_new_posts_task}, Обновлено инфо о постах: {total_updated_posts_info_task}, Новых комментариев собрано: {total_new_comments_collected_task}."
+                final_summary = f"Обновление завершено. Каналов обработано: {processed_channels_count}, Новых постов: {total_new_posts}, Обновлено инфо о постах: {total_updated_posts_info}, Новых комментариев собрано: {total_new_comments_collected}."
                 logger.info(f"{log_prefix} {final_summary}")
                 
                 current_meta = {'current_step': 'Данные собраны, подготовка к AI-анализу', 'progress': 85, 'summary_so_far': final_summary}
                 self.update_state(state='PROGRESS', meta=current_meta)
 
-                if analyze_new_comments and newly_added_comment_ids_for_ai_task:
-                    unique_comment_ids = sorted(list(set(newly_added_comment_ids_for_ai_task)))
+                if analyze_new_comments and newly_added_or_updated_comment_ids_inner:
+                    unique_comment_ids = sorted(list(set(newly_added_or_updated_comment_ids_inner)))
                     logger.info(f"{log_prefix} Запуск AI-анализа для {len(unique_comment_ids)} новых/обновленных комментариев.")
-                    
-                    ai_analysis_sub_batch_size = settings.COMMENT_ENQUEUE_BATCH_SIZE 
-                    
-                    num_sub_tasks = 0
-                    for i in range(0, len(unique_comment_ids), ai_analysis_sub_batch_size):
-                        batch_comment_ids = unique_comment_ids[i:i + ai_analysis_sub_batch_size]
-                        logger.info(f"{log_prefix}  Ставлю в очередь на AI-анализ задачу enqueue_comments_for_ai_feature_analysis_task с {len(batch_comment_ids)} ID комментариев.")
-                        enqueue_comments_for_ai_feature_analysis_task.delay(
-                            comment_ids_to_process=batch_comment_ids
-                        )
-                        num_sub_tasks += 1
-
-                    current_meta['current_step'] = f'AI-анализ для {len(unique_comment_ids)} комментариев поставлен в очередь ({num_sub_tasks} задач(и) enqueue_comments_for_ai_feature_analysis_task)'
+                    enqueue_comments_for_ai_feature_analysis_task.delay(
+                        comment_ids_to_process=unique_comment_ids, 
+                        limit_comments_to_queue=settings.AI_ANALYSIS_BATCH_SIZE 
+                    )
+                    current_meta['current_step'] = f'AI-анализ для {len(unique_comment_ids)} комментариев поставлен в очередь'
                     current_meta['progress'] = 95
                     self.update_state(state='PROGRESS', meta=current_meta)
-
                 elif analyze_new_comments:
                     logger.info(f"{log_prefix} Нет новых комментариев для AI-анализа.")
                     current_meta['current_step'] = 'Нет комментариев для AI-анализа'
@@ -1338,11 +1171,11 @@ def advanced_data_refresh_task(
                 return final_summary
         except ConnectionRefusedError as e_auth_tg: 
             logger.error(f"{log_prefix} ОШИБКА АВТОРИЗАЦИИ TELETHON: {e_auth_tg}", exc_info=True)
-            self.update_state(state='FAILURE', meta={'current_step': 'Ошибка авторизации Telegram', 'error': str(e_auth_tg), 'progress': 100}) 
+            # Статус уже должен быть установлен внутри _async_advanced_refresh_logic
             raise 
         except Exception as e_main_refresh:
             logger.error(f"{log_prefix} КРИТИЧЕСКАЯ ОШИБКА в _async_advanced_refresh_logic: {type(e_main_refresh).__name__} - {e_main_refresh}", exc_info=True)
-            self.update_state(state='FAILURE', meta={'current_step': f'Критическая ошибка: {type(e_main_refresh).__name__}', 'error': str(e_main_refresh), 'progress': 100})
+            self.update_state(state='FAILURE', meta={'current_step': f'Критическая ошибка: {type(e_main_refresh).__name__}', 'error': str(e_main_refresh)})
             raise 
         finally:
             if tg_client and tg_client.is_connected():
@@ -1358,23 +1191,20 @@ def advanced_data_refresh_task(
     try:
         result_message = asyncio.run(_async_advanced_refresh_logic())
         task_duration = time.time() - task_start_time
-        logger.info(f"{log_prefix} Celery таск '{self.name}' (с ЛОКАЛЬНЫМ ENGINE) завершен за {task_duration:.2f} сек. Результат: {result_message}")
         return result_message
     except Exception as e_task_level: 
         task_duration = time.time() - task_start_time
         logger.error(f"!!! Celery: ОШИБКА УРОВНЯ ЗАДАЧИ в '{self.name}' (с ЛОКАЛЬНЫМ ENGINE) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
         
-        current_task_info = self.AsyncResult(self.request.id).info
-        is_failure_already_set_specifically = isinstance(current_task_info, dict) and \
-                                            self.AsyncResult(self.request.id).state == 'FAILURE' and \
-                                            current_task_info.get('error') 
+        current_task_state_info = self.AsyncResult(self.request.id).info
+        is_already_failed_with_specific_message = isinstance(current_task_state_info, dict) and current_task_state_info.get('current_step','').startswith('Ошибка в') # Общая проверка на наши ошибки
 
-        if not is_failure_already_set_specifically:
-             self.update_state(state='FAILURE', meta={'current_step': f'Общая ошибка выполнения задачи: {type(e_task_level).__name__}', 'error': str(e_task_level), 'progress': 100})
+        if not is_already_failed_with_specific_message and self.AsyncResult(self.request.id).state != 'FAILURE':
+             self.update_state(state='FAILURE', meta={'current_step': f'Общая ошибка выполнения задачи: {type(e_task_level).__name__}', 'error': str(e_task_level)})
         
         if isinstance(e_task_level, ConnectionRefusedError): 
             logger.warning(f"Celery: НЕ БУДЕТ ПОВТОРА для {self.request.id} из-за ошибки авторизации.")
-            raise e_task_level from None 
+            raise e_task_level 
         
         try:
             if self.request.retries < self.max_retries:
@@ -1384,7 +1214,7 @@ def advanced_data_refresh_task(
                 raise self.retry(exc=e_task_level, countdown=countdown)
             else:
                 logger.error(f"Celery: Max retries ({self.max_retries}) достигнуто для {self.request.id} (с ЛОКАЛЬНЫМ ENGINE). Ошибка: {type(e_task_level).__name__}")
-                raise e_task_level from None
+                raise e_task_level 
         except Exception as e_retry_logic: 
             logger.error(f"Celery: Исключение в логике retry для {self.request.id} (с ЛОКАЛЬНЫМ ENGINE): {type(e_retry_logic).__name__}", exc_info=True)
-            raise e_task_level from e_retry_logic
+            raise e_task_level
