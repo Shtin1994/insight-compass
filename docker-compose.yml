@@ -37,15 +37,18 @@ services:
       dockerfile: Dockerfile
     container_name: insight_compass_api
     restart: unless-stopped
+    dns: # <--- ДОБАВЛЕНО DNS ДЛЯ API
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
       - ./app:/app
       - ./.env:/app/.env:ro
-    working_dir: /
+    working_dir: / # Если это работает для тебя, можно оставить / или изменить на /app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     environment:
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app # Убедись, что PYTHONPATH корректен для твоего working_dir
       - POSTGRES_USER=${POSTGRES_USER:-user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
@@ -55,12 +58,6 @@ services:
       - REDIS_PORT=${REDIS_PORT:-6379}
       - APP_HOST=${APP_HOST:-0.0.0.0}
       - APP_PORT=${APP_PORT:-8000}
-      # Оставляем эти закомментированными для API, если они не обязательны в config.py для старта API
-      # - TELEGRAM_API_ID=${TELEGRAM_API_ID}
-      # - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
-      # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      # - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
-      # - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -73,14 +70,16 @@ services:
       dockerfile: Dockerfile
     container_name: insight_compass_celery_worker
     restart: unless-stopped
-    working_dir: / 
-    command: celery -A app.celery_app worker -l INFO -c 1 # <--- ИЗМЕНЕНИЕ ЗДЕСЬ
+    dns: # <--- ДОБАВЛЕНО DNS ДЛЯ CELERY WORKER
+      - 8.8.8.8
+      - 1.1.1.1
+    working_dir: / # Аналогично api, проверь связку с PYTHONPATH
+    command: celery -A app.celery_app worker -l INFO -c 1
     volumes:
       - ./app:/app
       - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
-      # Все эти переменные должны быть в .env, так как celery_worker их использует
       - POSTGRES_USER=${POSTGRES_USER:-user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
@@ -92,32 +91,31 @@ services:
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
-      - OPENAI_API_KEY=${OPENAI_API_KEY} # Добавим и для worker'а, на случай если задачи AI будут
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
       db:
         condition: service_healthy
 
-  celery_beat: # <--- НОВЫЙ СЕРВИС
+  celery_beat:
     build:
-      context: ./app # Используем тот же образ
+      context: ./app 
       dockerfile: Dockerfile
     container_name: insight_compass_celery_beat
     restart: unless-stopped
-    working_dir: /
-    command: celery -A app.celery_app beat -l INFO # Простая команда, расписание в коде
+    dns: # <--- ДОБАВЛЕНО DNS ДЛЯ CELERY BEAT
+      - 8.8.8.8
+      - 1.1.1.1
+    working_dir: / # Аналогично api, проверь связку с PYTHONPATH
+    command: celery -A app.celery_app beat -l INFO 
     volumes:
       - ./app:/app
-      - ./.env:/app/.env:ro # Beat может понадобиться доступ к настройкам для импорта app.celery_app
+      - ./.env:/app/.env:ro 
     environment:
       - PYTHONPATH=/app
-      # Основные переменные для импорта app.celery_app и подключения к Redis
       - REDIS_HOST=redis 
       - REDIS_PORT=${REDIS_PORT:-6379}
-      # Если app.celery_app импортирует app.core.config, то нужны и остальные обязательные переменные
-      # которые pydantic-settings будет пытаться загрузить.
-      # Поэтому передаем те же, что и для worker'а, для безопасности.
       - POSTGRES_USER=${POSTGRES_USER:-user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=${POSTGRES_DB:-insight_compass_db}
@@ -129,14 +127,13 @@ services:
       - TELEGRAM_PHONE_NUMBER_FOR_LOGIN=${TELEGRAM_PHONE_NUMBER_FOR_LOGIN}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
-      - redis # Beat должен иметь доступ к брокеру для отправки задач
-      - db    # Если вдруг app.celery_app косвенно трогает БД при импорте (маловероятно, но безопаснее)
-      # - api # Обычно не требуется явная зависимость от API для Beat
+      - redis 
+      - db    
 
 volumes:
   postgres_data:
   redis_data:
 
-# networks:
+# networks: # Если ты используешь кастомные сети, раскомментируй и настрой
 #   app_network:
 #     driver: bridge

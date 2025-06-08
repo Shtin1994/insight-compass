@@ -165,9 +165,10 @@ class NLQueryResponse(BaseModel):
 # --- НАЧАЛО: Схемы для "Продвинутого обновления данных" ---
 
 class PostRefreshMode(str, Enum):
-    NEW_ONLY = "new_only"         # Только новые посты (с last_processed_post_id)
-    LAST_N_DAYS = "last_n_days"   # Посты за последние N дней
-    SINCE_DATE = "since_date"     # Посты с указанной даты
+    NEW_ONLY = "new_only"
+    LAST_N_DAYS = "last_n_days"
+    SINCE_DATE = "since_date"
+    UPDATE_STATS_ONLY = "update_stats_only" # Только обновить статистику существующих в БД постов
 
 class CommentRefreshMode(str, Enum):
     NEW_POSTS_ONLY = "new_posts_only"       # Только для новых постов

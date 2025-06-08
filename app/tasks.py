@@ -806,12 +806,22 @@ def enqueue_comments_for_ai_feature_analysis_task(self, limit_comments_to_queue:
     except Exception as e_task_level:
         task_duration = time.time() - task_start_time; logger.error(f"!!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True); raise e_task_level
 
+# Убедись, что эти импорты есть в начале файла app/tasks.py
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker, aliased
+# ... остальные твои импорты ...
+
+# Убедись, что эти импорты есть в начале файла app/tasks.py
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker, aliased
+# ... остальные твои импорты ...
+
 @celery_instance.task(name="tasks.advanced_data_refresh", bind=True, max_retries=2, default_retry_delay=60 * 10)
 def advanced_data_refresh_task(
     self,
     channel_ids: Optional[List[int]] = None,
     post_refresh_mode_str: str = PostRefreshMode.NEW_ONLY.value,
-    post_refresh_days: Optional[int] = None,
+    post_refresh_days: Optional[int] = None, # <--- ИСПРАВЛЕНО: убрана лишняя ']'
     post_refresh_start_date_iso: Optional[str] = None,
     post_limit_per_channel: int = 100,
     update_existing_posts_info: bool = False,
@@ -820,15 +830,12 @@ def advanced_data_refresh_task(
     analyze_new_comments: bool = True
 ):
     task_start_time = time.time()
-    log_prefix = "[AdvancedRefresh]" # Возвращаем оригинальный префикс
+    log_prefix = "[AdvancedRefresh]"
     
     logger.info(f"{log_prefix} Запущена задача (с ЛОКАЛЬНЫМ ENGINE). ID: {self.request.id}. Параметры: channels={channel_ids}, post_mode='{post_refresh_mode_str}', post_days={post_refresh_days}, post_start_date='{post_refresh_start_date_iso}', post_limit={post_limit_per_channel}, update_existing={update_existing_posts_info}, comment_mode='{comment_refresh_mode_str}', comment_limit={comment_limit_per_post}, analyze={analyze_new_comments}")
     
     self.update_state(state='PROGRESS', meta={'current_step': 'Инициализация задачи (Локальный Engine)', 'progress': 5})
     
-    # Эти переменные будут использоваться внутри _async_advanced_refresh_logic
-    # и должны быть доступны там через замыкание или переданы как аргументы.
-    # Для простоты, мы их определим здесь, и они будут доступны в замыкании.
     post_refresh_mode_enum: PostRefreshMode
     comment_refresh_mode_enum: CommentRefreshMode
     post_refresh_start_date: Optional[datetime] = None
@@ -855,13 +862,8 @@ def advanced_data_refresh_task(
         return "Config error: Telegram API ID/Hash"
 
     async def _async_advanced_refresh_logic():
-        # Nonlocal переменные из внешней функции теперь доступны здесь через замыкание
-        # nonlocal post_refresh_mode_enum, comment_refresh_mode_enum, post_refresh_start_date
-        # nonlocal channel_ids, post_limit_per_channel, update_existing_posts_info, comment_limit_per_post, analyze_new_comments
-        # nonlocal api_id_val, api_hash_val, session_file_path, self, log_prefix # log_prefix из внешней функции
-
         tg_client = None
-        local_engine = None # Для корректного закрытия в finally
+        local_engine = None 
         processed_channels_count = 0
         total_new_posts = 0
         total_updated_posts_info = 0
@@ -869,7 +871,6 @@ def advanced_data_refresh_task(
         newly_added_or_updated_comment_ids_inner: List[int] = []
         
         try:
-            # --- Создаем engine и session factory ЛОКАЛЬНО для этой задачи ---
             ASYNC_DB_URL = settings.DATABASE_URL 
             if not ASYNC_DB_URL.startswith("postgresql+asyncpg://"):
                 ASYNC_DB_URL = ASYNC_DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -879,15 +880,13 @@ def advanced_data_refresh_task(
                 bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
             )
             logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
-            # --- Конец локального создания ---
 
-            async with LocalAsyncSessionFactory() as db: # Используем ЛОКАЛЬНУЮ фабрику сессий
+            async with LocalAsyncSessionFactory() as db: 
                 logger.info(f"{log_prefix} Создание TGClient: {session_file_path}")
                 tg_client = TelegramClient(session_file_path, api_id_val, api_hash_val)
                 self.update_state(state='PROGRESS', meta={'current_step': 'Подключение к Telegram', 'progress': 10})
                 await tg_client.connect()
                 if not await tg_client.is_user_authorized():
-                    # Обновляем статус задачи перед выбросом исключения
                     self.update_state(state='FAILURE', meta={'current_step': 'Ошибка авторизации Telegram', 'error': 'TG Client not authorized'})
                     raise ConnectionRefusedError(f"Celery: Пользователь не авторизован для {session_file_path}.session")
                 me = await tg_client.get_me()
@@ -921,15 +920,79 @@ def advanced_data_refresh_task(
                     
                     try:
                         tg_channel_entity = await tg_client.get_entity(channel_db.id)
-                        iter_params: Dict[str, Any] = {"entity": tg_channel_entity, "limit": None}
                         
                         current_posts_for_comment_scan: List[Post] = []
-                        current_newly_created_posts: List[Post] = []
-                        current_new_p_ch: int = 0
+                        current_newly_created_posts: List[Post] = [] # Будет пуст для UPDATE_STATS_ONLY
+                        current_new_p_ch: int = 0 # Будет 0 для UPDATE_STATS_ONLY
                         current_upd_p_ch: int = 0
                         current_last_id_tg: int = channel_db.last_processed_post_id or 0
 
-                        if post_refresh_mode_enum == PostRefreshMode.NEW_ONLY:
+                        iter_params: Dict[str, Any] = {"entity": tg_channel_entity, "limit": None}
+
+                        if post_refresh_mode_enum == PostRefreshMode.UPDATE_STATS_ONLY:
+                            logger.info(f"{log_prefix}  Режим UPDATE_STATS_ONLY для канала {channel_db.title}.")
+                            if not update_existing_posts_info: # Для этого режима флаг должен быть True
+                                logger.warning(f"{log_prefix}    Режим UPDATE_STATS_ONLY, но update_existing_posts_info=False. Статистика постов не будет принудительно обновлена из Telegram, только собраны комменты для существующих.")
+                            
+                            db_posts_stmt = select(Post).where(Post.channel_id == channel_db.id).order_by(Post.telegram_post_id.desc())
+                            # Можно добавить .limit(post_limit_per_channel) если постов очень много и хотим ограничить обновление
+                            
+                            db_posts_result = await db.execute(db_posts_stmt)
+                            db_posts_list = db_posts_result.scalars().unique().all()
+
+                            if db_posts_list:
+                                telegram_post_ids_to_fetch = [p.telegram_post_id for p in db_posts_list]
+                                logger.info(f"{log_prefix}    Найдено {len(db_posts_list)} постов в БД для канала {channel_db.title} для обновления статистики.")
+                                
+                                batch_size = 100 
+                                for i in range(0, len(telegram_post_ids_to_fetch), batch_size):
+                                    batch_ids = telegram_post_ids_to_fetch[i:i + batch_size]
+                                    fetched_tg_messages: Optional[List[Message]] = None
+                                    logger.info(f"{log_prefix}    Запрашиваем из Telegram информацию для пачки из {len(batch_ids)} постов...")
+                                    try:
+                                        messages_or_none = await tg_client.get_messages(tg_channel_entity, ids=batch_ids)
+                                        if messages_or_none:
+                                            fetched_tg_messages = [msg for msg in messages_or_none if msg is not None]
+                                    except Exception as e_get_msgs_batch:
+                                        logger.error(f"{log_prefix}    Ошибка при пакетном получении сообщений по ID для канала {channel_db.id}: {e_get_msgs_batch}")
+                                        continue 
+
+                                    if fetched_tg_messages:
+                                        logger.info(f"{log_prefix}      Получено {len(fetched_tg_messages)} сообщений из Telegram для обновления.")
+                                        db_posts_map = {p.telegram_post_id: p for p in db_posts_list if p.telegram_post_id in batch_ids}
+
+                                        for tg_message in fetched_tg_messages:
+                                            if tg_message.id in db_posts_map:
+                                                post_in_db = db_posts_map[tg_message.id]
+                                                
+                                                api_comments_count = tg_message.replies.replies if tg_message.replies and tg_message.replies.replies is not None else 0
+                                                
+                                                post_in_db.views_count = tg_message.views
+                                                post_in_db.reactions = await _process_reactions_for_db(tg_message.reactions)
+                                                post_in_db.forwards_count = tg_message.forwards
+                                                post_in_db.edited_at = tg_message.edit_date.replace(tzinfo=timezone.utc) if tg_message.edit_date else None
+                                                post_in_db.comments_count = api_comments_count # Обновляем из TG
+                                                
+                                                # Обновляем основной контент тоже, так как он мог измениться
+                                                post_in_db.text_content, post_in_db.caption_text = (None, tg_message.text) if tg_message.media and tg_message.text else (tg_message.text if not tg_message.media else None, None)
+                                                post_in_db.media_type, post_in_db.media_content_info = await _process_media_for_db(tg_message.media)
+                                                post_in_db.is_pinned = tg_message.pinned or False
+                                                post_in_db.author_signature = tg_message.post_author
+                                                post_in_db.updated_at = datetime.now(timezone.utc)
+
+                                                db.add(post_in_db)
+                                                current_posts_for_comment_scan.append(post_in_db)
+                                                current_upd_p_ch += 1
+                                        
+                                        # Логгируем после обработки каждой пачки, если были обновления в ней
+                                        # Это может быть много логов, если пачек много. Возможно, лучше один лог в конце.
+                                        # logger.info(f"{log_prefix}      Обновлена статистика (в текущей пачке) для {current_upd_p_ch - temp_upd_count_before_batch} постов.")
+                            else:
+                                logger.info(f"{log_prefix}    Нет постов в БД для канала {channel_db.title} для обновления статистики.")
+                            # current_new_p_ch и current_newly_created_posts остаются 0 и []
+                            # current_last_id_tg не обновляется
+
+                        elif post_refresh_mode_enum == PostRefreshMode.NEW_ONLY:
                             iter_params["limit"] = post_limit_per_channel
                             if channel_db.last_processed_post_id:
                                 iter_params["min_id"] = channel_db.last_processed_post_id
@@ -944,7 +1007,6 @@ def advanced_data_refresh_task(
                             iter_params["reverse"] = True
                             iter_params["limit"] = post_limit_per_channel
                             current_posts_for_comment_scan, current_newly_created_posts, current_new_p_ch, current_upd_p_ch, current_last_id_tg = await _helper_fetch_and_process_posts_for_channel(tg_client, db, channel_db, iter_params, update_existing_posts_info, log_prefix)
-                        # Добавь сюда ветку для PostRefreshMode.UPDATE_STATS_ONLY, если будешь реализовывать Кнопку 2
                         
                         total_new_posts += current_new_p_ch
                         total_updated_posts_info += current_upd_p_ch
@@ -957,7 +1019,6 @@ def advanced_data_refresh_task(
                             channel_specific_comments_collected = 0
                             channel_specific_new_comment_ids: List[int] = []
                             
-                            # posts_for_comment_scan должна быть определена из блока if/elif выше
                             if current_posts_for_comment_scan: 
                                 posts_to_scan_for_comments: List[Post] = []
                                 if comment_refresh_mode_enum == CommentRefreshMode.NEW_POSTS_ONLY:
@@ -1021,7 +1082,7 @@ def advanced_data_refresh_task(
                 
                 self.update_state(state='SUCCESS', meta={'current_step': 'Завершено успешно!', 'progress': 100, 'result_summary': final_summary})
                 return final_summary
-        except ConnectionRefusedError as e_auth_tg: # Эта ошибка теперь может быть выброшена из _async_advanced_refresh_logic
+        except ConnectionRefusedError as e_auth_tg: 
             logger.error(f"{log_prefix} ОШИБКА АВТОРИЗАЦИИ TELETHON: {e_auth_tg}", exc_info=True)
             # Статус уже должен быть установлен внутри _async_advanced_refresh_logic
             raise 
@@ -1034,25 +1095,26 @@ def advanced_data_refresh_task(
                 logger.info(f"{log_prefix} Отключение Telegram клиента в finally.")
                 try:
                     await tg_client.disconnect()
-                except Exception as e_disconnect: # Ловим возможные ошибки при отключении
+                except Exception as e_disconnect: 
                     logger.error(f"{log_prefix} Ошибка при отключении tg_client: {e_disconnect}", exc_info=True)
             if local_engine:
                 logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
                 await local_engine.dispose()
-    # --- Конец функции _async_advanced_refresh_logic ---
 
     try:
         result_message = asyncio.run(_async_advanced_refresh_logic())
         task_duration = time.time() - task_start_time
-        # Лог об успешном завершении уже есть в _async_advanced_refresh_logic, если она дошла до конца
-        # logger.info(f"{log_prefix_main_task} Celery таск '{self.name}' (с ЛОКАЛЬНЫМ ENGINE) УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
         return result_message
     except Exception as e_task_level: 
         task_duration = time.time() - task_start_time
         logger.error(f"!!! Celery: ОШИБКА УРОВНЯ ЗАДАЧИ в '{self.name}' (с ЛОКАЛЬНЫМ ENGINE) (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
         
-        # Статус FAILURE уже должен быть установлен внутри _async_advanced_refresh_logic или при ошибке авторизации
-        # Здесь просто обрабатываем ретраи
+        current_task_state_info = self.AsyncResult(self.request.id).info
+        is_already_failed_with_specific_message = isinstance(current_task_state_info, dict) and current_task_state_info.get('current_step','').startswith('Ошибка в') # Общая проверка на наши ошибки
+
+        if not is_already_failed_with_specific_message and self.AsyncResult(self.request.id).state != 'FAILURE':
+             self.update_state(state='FAILURE', meta={'current_step': f'Общая ошибка выполнения задачи: {type(e_task_level).__name__}', 'error': str(e_task_level)})
+        
         if isinstance(e_task_level, ConnectionRefusedError): 
             logger.warning(f"Celery: НЕ БУДЕТ ПОВТОРА для {self.request.id} из-за ошибки авторизации.")
             raise e_task_level 
