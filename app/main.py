@@ -2,29 +2,29 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone, date 
-from sqlalchemy import Date as SQLDate 
-from typing import List, Optional, Dict, Tuple 
-from enum import Enum as PyEnum 
-import re 
+from datetime import datetime, timedelta, timezone, date
+from sqlalchemy import Date as SQLDate
+from typing import List, Optional, Dict, Tuple, Any
+from enum import Enum as PyEnum
+import re
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.exc import IntegrityError 
-import sqlalchemy as sa 
+from sqlalchemy.exc import IntegrityError
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, asc, cast, literal_column, nullslast, update, delete, or_, text, Integer as SAInteger, Column as SAColumn
 from sqlalchemy.orm import selectinload, aliased
-from sqlalchemy.dialects.postgresql import JSONB 
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql.expression import column
 
 from telethon import TelegramClient
 from telethon.errors import ChannelPrivateError, UsernameInvalidError, UsernameNotOccupiedError
 from telethon.tl.types import Channel as TelethonChannelType, Chat as TelethonChatType, User as TelethonUserType
 
-from .models import Post, Comment, Channel 
+from .models import Post, Comment, Channel
 from . import models as models_module
-from .db.session import get_async_db 
+from .db.session import get_async_db
 from .celery_app import celery_instance
 from .core.config import settings
 from .schemas import ui_schemas
@@ -39,10 +39,10 @@ except ImportError:
 # Импорт Celery задач
 try:
     from app.tasks import ( # Сгруппировал импорты для читаемости
-        collect_telegram_data_task, 
+        collect_telegram_data_task,
         summarize_posts_batch_task, # UPDATED: Was summarize_top_posts_task
-        send_daily_digest_task, 
-        analyze_posts_sentiment_task, 
+        send_daily_digest_task,
+        analyze_posts_sentiment_task,
         enqueue_comments_for_ai_feature_analysis_task,
         advanced_data_refresh_task
     )
@@ -95,10 +95,10 @@ async def get_telegram_client() -> TelegramClient:
 
 app = FastAPI(title=settings.PROJECT_NAME, version="0.1.0")
 app.add_middleware(
-    CORSMiddleware, 
+    CORSMiddleware,
     allow_origins=["*"], # В продакшене лучше указать конкретные домены
-    allow_credentials=True, 
-    allow_methods=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"]
 )
 
@@ -109,13 +109,13 @@ async def startup_event():
         logger.error("Telegram API credentials not configured. Telegram client will not be initialized.")
         telegram_client_instance = None # Явно устанавливаем в None
         return
-    
+
     session_file_path = "/app/api_telegram_session" # Убедитесь, что эта папка существует и доступна для записи
     logger.info(f"API using session: {session_file_path}.session")
-    
+
     # Инициализация клиента здесь
     telegram_client_instance = TelegramClient(session_file_path, settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH)
-    
+
     try:
         logger.info("API: Connecting to Telegram...")
         await telegram_client_instance.connect()
@@ -227,17 +227,17 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_async_db)):
 async def get_activity_over_time(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_async_db)):
     endpoint_logger.info(f"GET /api/v1/dashboard/activity_over_time?days={days}")
     try:
-        start_date_dt = datetime.now(timezone.utc) - timedelta(days=days -1); start_date = start_date_dt.date()
+        start_date_dt = datetime.now(timezone.utc) - timedelta(days=days -1); start_date_val = start_date_dt.date() # Renamed
         active_channels_subquery = select(models_module.Channel.id).where(models_module.Channel.is_active == True).subquery()
-        posts_activity_stmt = (select(cast(models_module.Post.posted_at, SQLDate).label("activity_day"), func.count(models_module.Post.id).label("count")).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(cast(models_module.Post.posted_at, SQLDate) >= start_date).group_by(cast(models_module.Post.posted_at, SQLDate)).order_by(cast(models_module.Post.posted_at, SQLDate).asc()))
+        posts_activity_stmt = (select(cast(models_module.Post.posted_at, SQLDate).label("activity_day"), func.count(models_module.Post.id).label("count")).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(cast(models_module.Post.posted_at, SQLDate) >= start_date_val).group_by(cast(models_module.Post.posted_at, SQLDate)).order_by(cast(models_module.Post.posted_at, SQLDate).asc()))
         posts_by_day_result = await db.execute(posts_activity_stmt)
         posts_by_day = {row.activity_day: row.count for row in posts_by_day_result.all()}
-        comments_activity_stmt = (select(cast(models_module.Comment.commented_at, SQLDate).label("activity_day"), func.count(models_module.Comment.id).label("count")).join(models_module.Post, models_module.Comment.post_id == models_module.Post.id).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(cast(models_module.Comment.commented_at, SQLDate) >= start_date).group_by(cast(models_module.Comment.commented_at, SQLDate)).order_by(cast(models_module.Comment.commented_at, SQLDate).asc()))
+        comments_activity_stmt = (select(cast(models_module.Comment.commented_at, SQLDate).label("activity_day"), func.count(models_module.Comment.id).label("count")).join(models_module.Post, models_module.Comment.post_id == models_module.Post.id).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(cast(models_module.Comment.commented_at, SQLDate) >= start_date_val).group_by(cast(models_module.Comment.commented_at, SQLDate)).order_by(cast(models_module.Comment.commented_at, SQLDate).asc()))
         comments_by_day_result = await db.execute(comments_activity_stmt)
         comments_by_day = {row.activity_day: row.count for row in comments_by_day_result.all()}
         activity_data: List[ui_schemas.ActivityOverTimePoint] = []
-        current_date_iter = start_date; end_date = datetime.now(timezone.utc).date()
-        while current_date_iter <= end_date:
+        current_date_iter = start_date_val; end_date_val = datetime.now(timezone.utc).date() # Renamed
+        while current_date_iter <= end_date_val:
             activity_data.append(ui_schemas.ActivityOverTimePoint(activity_date=current_date_iter, post_count=posts_by_day.get(current_date_iter, 0), comment_count=comments_by_day.get(current_date_iter, 0)))
             current_date_iter += timedelta(days=1)
         return ui_schemas.ActivityOverTimeResponse(data=activity_data)
@@ -247,12 +247,12 @@ async def get_activity_over_time(days: int = Query(7, ge=1, le=90), db: AsyncSes
 async def get_top_channels(metric: str = Query("posts", pattern="^(posts|comments)$"), limit: int = Query(5, ge=1, le=20), days_period: int = Query(7, ge=1, le=365), db: AsyncSession = Depends(get_async_db)):
     endpoint_logger.info(f"GET /api/v1/dashboard/top_channels?metric={metric}&limit={limit}&days_period={days_period}")
     try:
-        start_date = datetime.now(timezone.utc) - timedelta(days=days_period)
+        start_date_val = datetime.now(timezone.utc) - timedelta(days=days_period) # Renamed
         base_query_channels = select(models_module.Channel.id.label("channel_id"), models_module.Channel.title.label("channel_title"), models_module.Channel.username.label("channel_username")).where(models_module.Channel.is_active == True)
         if metric == "posts":
-            stmt = (base_query_channels.add_columns(func.count(models_module.Post.id).label("metric_value")).join(models_module.Post, models_module.Channel.id == models_module.Post.channel_id).where(models_module.Post.posted_at >= start_date).group_by(models_module.Channel.id, models_module.Channel.title, models_module.Channel.username).order_by(desc(literal_column("metric_value"))).limit(limit))
+            stmt = (base_query_channels.add_columns(func.count(models_module.Post.id).label("metric_value")).join(models_module.Post, models_module.Channel.id == models_module.Post.channel_id).where(models_module.Post.posted_at >= start_date_val).group_by(models_module.Channel.id, models_module.Channel.title, models_module.Channel.username).order_by(desc(literal_column("metric_value"))).limit(limit))
         elif metric == "comments":
-            stmt = (base_query_channels.add_columns(func.count(models_module.Comment.id).label("metric_value")).join(models_module.Post, models_module.Channel.id == models_module.Post.channel_id).join(models_module.Comment, models_module.Post.id == models_module.Comment.post_id).where(models_module.Comment.commented_at >= start_date).group_by(models_module.Channel.id, models_module.Channel.title, models_module.Channel.username).order_by(desc(literal_column("metric_value"))).limit(limit))
+            stmt = (base_query_channels.add_columns(func.count(models_module.Comment.id).label("metric_value")).join(models_module.Post, models_module.Channel.id == models_module.Post.channel_id).join(models_module.Comment, models_module.Post.id == models_module.Comment.post_id).where(models_module.Comment.commented_at >= start_date_val).group_by(models_module.Channel.id, models_module.Channel.title, models_module.Channel.username).order_by(desc(literal_column("metric_value"))).limit(limit))
         else: raise HTTPException(status_code=400, detail="Invalid metric type specified.")
         top_channels_data_result = await db.execute(stmt)
         top_channels_data = top_channels_data_result.all()
@@ -264,11 +264,11 @@ async def get_top_channels(metric: str = Query("posts", pattern="^(posts|comment
 async def get_sentiment_distribution(days_period: int = Query(7, ge=1, le=365), db: AsyncSession = Depends(get_async_db)):
     endpoint_logger.info(f"GET /api/v1/dashboard/sentiment_distribution?days_period={days_period}")
     try:
-        start_date = datetime.now(timezone.utc) - timedelta(days=days_period)
+        start_date_val = datetime.now(timezone.utc) - timedelta(days=days_period) # Renamed
         active_channels_subquery = select(models_module.Channel.id).where(models_module.Channel.is_active == True).subquery()
-        total_analyzed_stmt = (select(func.count(models_module.Post.id)).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(models_module.Post.posted_at >= start_date).where(models_module.Post.post_sentiment_label.isnot(None)))
+        total_analyzed_stmt = (select(func.count(models_module.Post.id)).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(models_module.Post.posted_at >= start_date_val).where(models_module.Post.post_sentiment_label.isnot(None)))
         total_analyzed_posts = (await db.execute(total_analyzed_stmt)).scalar_one_or_none() or 0
-        stmt = (select(models_module.Post.post_sentiment_label.label("sentiment_label"), func.count(models_module.Post.id).label("count")).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(models_module.Post.posted_at >= start_date).group_by(models_module.Post.post_sentiment_label).order_by(nullslast(models_module.Post.post_sentiment_label.asc())))
+        stmt = (select(models_module.Post.post_sentiment_label.label("sentiment_label"), func.count(models_module.Post.id).label("count")).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(models_module.Post.posted_at >= start_date_val).group_by(models_module.Post.post_sentiment_label).order_by(nullslast(models_module.Post.post_sentiment_label.asc())))
         sentiment_counts_result = await db.execute(stmt)
         sentiment_counts = sentiment_counts_result.all()
         data_list: List[ui_schemas.SentimentDistributionItem] = []
@@ -277,7 +277,7 @@ async def get_sentiment_distribution(days_period: int = Query(7, ge=1, le=365), 
             count = counts_map.get(label, 0); percentage = round((count / total_analyzed_posts) * 100, 2) if total_analyzed_posts > 0 else 0.0
             data_list.append(ui_schemas.SentimentDistributionItem(sentiment_label=label, count=count, percentage=percentage))
         if undefined_count > 0:
-            all_posts_in_period_stmt = select(func.count(models_module.Post.id)).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(models_module.Post.posted_at >= start_date)
+            all_posts_in_period_stmt = select(func.count(models_module.Post.id)).join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id).where(models_module.Post.posted_at >= start_date_val)
             all_posts_in_period = (await db.execute(all_posts_in_period_stmt)).scalar_one_or_none() or 0
             undefined_percentage = round((undefined_count / all_posts_in_period) * 100, 2) if all_posts_in_period > 0 else 0.0
             data_list.append(ui_schemas.SentimentDistributionItem(sentiment_label="undefined", count=undefined_count, percentage=undefined_percentage))
@@ -291,7 +291,7 @@ async def get_comment_insights(
     db: AsyncSession = Depends(get_async_db)
 ):
     endpoint_logger.info(f"GET /api/v1/dashboard/comment_insights?days_period={days_period}&top_n={top_n}")
-    start_date = datetime.now(timezone.utc) - timedelta(days=days_period)
+    start_date_val = datetime.now(timezone.utc) - timedelta(days=days_period) # Renamed
     active_channels_subquery = select(models_module.Channel.id).where(models_module.Channel.is_active == True).subquery("active_channels_for_insights")
     async def fetch_top_jsonb_array_elements(jsonb_field_name: str) -> List[ui_schemas.InsightItem]:
         comment_jsonb_field = getattr(models_module.Comment, jsonb_field_name)
@@ -301,11 +301,11 @@ async def get_comment_insights(
             .select_from(models_module.Comment)
             .join(models_module.Post, models_module.Comment.post_id == models_module.Post.id)
             .join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id)
-            .where(models_module.Comment.commented_at >= start_date)
-            .where(comment_jsonb_field.isnot(None)) 
+            .where(models_module.Comment.commented_at >= start_date_val)
+            .where(comment_jsonb_field.isnot(None))
             .where(func.jsonb_typeof(comment_jsonb_field) == 'array')
             .group_by(item_text_expression)
-            .order_by(desc(literal_column("item_count")), literal_column("item_text").asc()) 
+            .order_by(desc(literal_column("item_count")), literal_column("item_text").asc())
             .limit(top_n)
         )
         results = await db.execute(stmt)
@@ -354,23 +354,23 @@ async def get_insight_item_trend(
         date_group_expression_col = func.to_char(models_module.Comment.commented_at, 'YYYY-WW').label("trend_date_label") # Используем 'YYYY-WW' для недели
         date_format_str = "YYYY-WW" # Соответствующий формат для ключа
     else: raise HTTPException(status_code=400, detail="Invalid granularity specified.")
-    
+
     extracted_element_alias = func.jsonb_array_elements_text(comment_jsonb_field).alias("extracted_insight_element")
     stmt = (
         select(date_group_expression_col, func.count(models_module.Comment.id).label("item_count"))
         .select_from(models_module.Comment)
         .join(models_module.Post, models_module.Comment.post_id == models_module.Post.id)
         .join(active_channels_subquery, models_module.Post.channel_id == active_channels_subquery.c.id)
-        .join(extracted_element_alias, sa.true()) 
-        .where(cast(models_module.Comment.commented_at, SQLDate) >= query_start_date) 
+        .join(extracted_element_alias, sa.true())
+        .where(cast(models_module.Comment.commented_at, SQLDate) >= query_start_date)
         .where(comment_jsonb_field.isnot(None)).where(func.jsonb_typeof(comment_jsonb_field) == 'array')
-        .where(column("extracted_insight_element").ilike(f"%{item_text}%")) 
-        .group_by(date_group_expression_col).order_by(date_group_expression_col.asc()) 
+        .where(column("extracted_insight_element").ilike(f"%{item_text}%"))
+        .group_by(date_group_expression_col).order_by(date_group_expression_col.asc())
     )
     results = await db.execute(stmt)
     existing_data_map: Dict[str, int] = {str(row.trend_date_label): row.item_count for row in results.all()}
     trend_data_points: List[ui_schemas.InsightTrendDataPoint] = []
-    
+
     if granularity == ui_schemas.TrendGranularity.DAY:
         current_iter_date = query_start_date
         while current_iter_date <= today:
@@ -382,24 +382,24 @@ async def get_insight_item_trend(
         temp_date = query_start_date
         while temp_date <= today: # Итерируемся по дням, чтобы получить все недели в периоде
             all_week_keys_in_period.add(temp_date.strftime(date_format_str)) # PostgreSQL to_char 'YYYY-WW'
-            temp_date += timedelta(days=1) 
+            temp_date += timedelta(days=1)
         for week_key in sorted(list(all_week_keys_in_period)): # Сортируем недели
             trend_data_points.append(ui_schemas.InsightTrendDataPoint(date=week_key, count=existing_data_map.get(week_key,0)))
-            
+
     return ui_schemas.InsightItemTrendResponse(item_type=item_type, item_text=item_text, period_days=days_period, granularity=granularity, trend_data=trend_data_points)
 
 # --- ЭНДПОИНТ ДЛЯ ВОПРОСОВ НА ЕСТЕСТВЕННОМ ЯЗЫКЕ ---
 @api_v1_router.post("/natural_language_query/", response_model=ui_schemas.NLQueryResponse)
 async def natural_language_query(
-    request_data: ui_schemas.NLQueryRequest, 
+    request_data: ui_schemas.NLQueryRequest,
     db: AsyncSession = Depends(get_async_db)
 ):
     query_text_lower = request_data.query_text.lower()
     endpoint_logger.info(f"POST /natural_language_query/ - query: '{request_data.query_text}', explicit_days_period: {request_data.days_period}")
 
-    days_period_nlq = request_data.days_period 
+    days_period_nlq = request_data.days_period
 
-    if days_period_nlq is None: 
+    if days_period_nlq is None:
         match_days = re.search(r"за (?:последние |)\s*(\d+)\s*(день|дней|дня|недел)", query_text_lower)
         if match_days:
             num = int(match_days.group(1))
@@ -408,7 +408,7 @@ async def natural_language_query(
             else: days_period_nlq = num
             endpoint_logger.info(f"Извлечен период из текста: {days_period_nlq} дней.")
         else:
-            days_period_nlq = 7 
+            days_period_nlq = 7
             endpoint_logger.info(f"Период не найден в тексте, используется по умолчанию: {days_period_nlq} дней.")
     else:
         endpoint_logger.info(f"Используется явно переданный период: {days_period_nlq} дней.")
@@ -428,19 +428,19 @@ async def natural_language_query(
         jsonb_field_nlq = "extracted_problems"
         insight_name_for_prompt = "основные проблемы"
         insight_name_plural_for_prompt = "основных проблем"
-    elif "вопрос" in query_text_lower: 
+    elif "вопрос" in query_text_lower:
         insight_type_nlq = ui_schemas.InsightItemType.QUESTION
         jsonb_field_nlq = "extracted_questions"
         insight_name_for_prompt = "основные вопросы"
         insight_name_plural_for_prompt = "основных вопросов"
-    elif "предложен" in query_text_lower: 
+    elif "предложен" in query_text_lower:
         insight_type_nlq = ui_schemas.InsightItemType.SUGGESTION
         jsonb_field_nlq = "extracted_suggestions"
         insight_name_for_prompt = "основные предложения"
         insight_name_plural_for_prompt = "основных предложений"
 
     ai_answer: str
-    
+
     if insight_type_nlq and jsonb_field_nlq:
         try:
             start_date_nlq = datetime.now(timezone.utc) - timedelta(days=days_period_nlq)
@@ -453,11 +453,11 @@ async def natural_language_query(
                 .join(models_module.Post, models_module.Comment.post_id == models_module.Post.id)
                 .join(active_channels_subquery_nlq, models_module.Post.channel_id == active_channels_subquery_nlq.c.id)
                 .where(models_module.Comment.commented_at >= start_date_nlq)
-                .where(comment_jsonb_field_model.isnot(None)) 
+                .where(comment_jsonb_field_model.isnot(None))
                 .where(func.jsonb_typeof(comment_jsonb_field_model) == 'array')
                 .group_by(item_text_expr_nlq)
                 .order_by(desc(literal_column("item_count")))
-                .limit(5) 
+                .limit(5)
             )
             results_nlq = await db.execute(stmt_nlq)
             top_insights_data = [{"text": str(row.item_text), "count": row.item_count} for row in results_nlq.all()]
@@ -468,7 +468,7 @@ async def natural_language_query(
                 context_for_llm = f"Данные о топ-{len(top_insights_data)} {insight_name_for_prompt.replace('ые', 'ых')} за последние {days_period_nlq} дней:\n"
                 for item in top_insights_data:
                     context_for_llm += f"- \"{item['text']}\" (упоминаний: {item['count']})\n"
-                
+
                 prompt_for_llm = (
                     f"Ты — AI-аналитик данных из Telegram-каналов. "
                     f"Твоя задача — ответить на вопрос пользователя, используя предоставленные данные. "
@@ -479,11 +479,11 @@ async def natural_language_query(
                     f"ТВОЙ ОТВЕТ (сформулируй его как естественный текстовый ответ, упоминая, что информация относится к последним {days_period_nlq} дням, если это не противоречит сути вопроса; не используй период из текста вопроса пользователя, если он отличается от {days_period_nlq} дней; не перечисляй просто данные, а дай связный ответ):"
                 )
                 endpoint_logger.info(f"Промпт для LLM (NLQ):\n{prompt_for_llm}")
-                
+
                 llm_response = await одиночный_запрос_к_llm(
-                    prompt_for_llm, 
+                    prompt_for_llm,
                     модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106",
-                    is_json_response_expected=False 
+                    is_json_response_expected=False
                 )
                 ai_answer = llm_response or "Не удалось получить ответ от AI."
         except Exception as e_nlq_data:
@@ -493,12 +493,12 @@ async def natural_language_query(
         ai_answer = "Извините, я пока не могу ответить на такой тип вопроса. Попробуйте спросить про основные темы, проблемы, вопросы или предложения за определенный период (например, 'Какие темы обсуждали за 7 дней?')."
 
     return ui_schemas.NLQueryResponse(
-        original_query=request_data.query_text, 
+        original_query=request_data.query_text,
         ai_answer=ai_answer
     )
 
 # --- ENUMs для сортировки ---
-class PostSortByField(PyEnum): 
+class PostSortByField(PyEnum):
     posted_at = "posted_at"; comments_count = "comments_count"; views_count = "views_count"; forwards_count = "forwards_count"; reactions_total_sum = "reactions_total_sum"
 
 # --- ФУНКЦИЯ get_comment_author_display_name ---
@@ -511,14 +511,14 @@ def get_comment_author_display_name(comment: models_module.Comment) -> str:
 # --- ОБНОВЛЕННЫЙ ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ ПОСТОВ С СОРТИРОВКОЙ И ПОИСКОМ ---
 @api_v1_router.get("/posts/", response_model=ui_schemas.PaginatedPostsResponse)
 async def get_posts_for_ui(
-    page: int = Query(1, ge=1, description="Page number"), 
+    page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(10, ge=1, le=100, description="Number of items per page"),
     search_query: Optional[str] = Query(None),
-    sort_by: PostSortByField = Query(PostSortByField.posted_at.value, description="Поле для сортировки"), 
+    sort_by: PostSortByField = Query(PostSortByField.posted_at.value, description="Поле для сортировки"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Порядок сортировки"),
     db: AsyncSession = Depends(get_async_db)
 ):
-    skip = (page - 1) * limit 
+    skip = (page - 1) * limit
     endpoint_logger.info(f"GET /api/v1/posts/ - page={page} (skip={skip}), limit={limit}, search_query='{search_query}', sort_by='{sort_by.value}', sort_order='{sort_order}'")
     try:
         CurrentPostModel = models_module.Post; CurrentChannelModel = models_module.Channel
@@ -534,18 +534,18 @@ async def get_posts_for_ui(
         count_query = select(func.count()).select_from(posts_with_conditions_stmt.with_only_columns(CurrentPostModel.id).alias("sub_count_query"))
         total_posts_result = await db.execute(count_query); total_posts = total_posts_result.scalar_one_or_none() or 0
         order_expression = None
-        if sort_by == PostSortByField.reactions_total_sum: order_field = literal_column("calculated_total_reactions"); order_expression = asc(order_field).nullsfirst() if sort_order == "asc" else desc(order_field).nullslast() 
+        if sort_by == PostSortByField.reactions_total_sum: order_field = literal_column("calculated_total_reactions"); order_expression = asc(order_field).nullsfirst() if sort_order == "asc" else desc(order_field).nullslast()
         else:
             order_field_attr = getattr(CurrentPostModel, sort_by.value, CurrentPostModel.posted_at)
             if sort_by in [PostSortByField.views_count, PostSortByField.forwards_count, PostSortByField.comments_count]: order_expression = asc(order_field_attr).nullsfirst() if sort_order == "asc" else desc(order_field_attr).nullslast()
             else: order_expression = asc(order_field_attr) if sort_order == "asc" else desc(order_field_attr)
         final_posts_query = posts_with_conditions_stmt.order_by(order_expression).options(selectinload(CurrentPostModel.channel)).offset(skip).limit(limit)
         results = await db.execute(final_posts_query)
-        if sort_by == PostSortByField.reactions_total_sum: posts_scalars = [row[0] for row in results.all()] 
-        else: posts_scalars = results.scalars().unique().all() 
+        if sort_by == PostSortByField.reactions_total_sum: posts_scalars = [row[0] for row in results.all()]
+        else: posts_scalars = results.scalars().unique().all()
         posts_list = [ui_schemas.PostListItem.model_validate(post) for post in posts_scalars]
         return ui_schemas.PaginatedPostsResponse(total_posts=total_posts, posts=posts_list)
-    except Exception as e: endpoint_logger.error(f"Error in get_posts_for_ui: {e}", exc_info=True); 
+    except Exception as e: endpoint_logger.error(f"Error in get_posts_for_ui: {e}", exc_info=True);
     if hasattr(e, 'errors') and callable(e.errors): endpoint_logger.error(f"Pydantic ValidationError details: {e.errors()}")
     raise HTTPException(status_code=500, detail="Internal server error while fetching posts")
 
@@ -570,31 +570,31 @@ async def get_comments_for_post_ui(post_id: int, skip: int = Query(0, ge=0), lim
 
 # --- Эндпоинты для запуска Celery задач ---
 @api_v1_router.post("/run-collection-task/", summary="Запустить задачу сбора данных")
-async def run_collection_task_endpoint(): 
+async def run_collection_task_endpoint():
     task = collect_telegram_data_task.delay()
     return {"message": "Задача сбора данных запущена.", "task_id": task.id}
 
 @api_v1_router.post("/run-summarization-task/", summary="Запустить задачу суммаризации") # This refers to the old summarize_top_posts_task or potentially a general one.
-async def run_summarization_task_endpoint(): 
+async def run_summarization_task_endpoint():
     # This endpoint might need to be updated if `summarize_top_posts_task` was fully replaced by `summarize_posts_batch_task`
     # For now, assuming it might call the new batch task without specific channel_ids (meaning all active)
     task = summarize_posts_batch_task.delay() # Updated to call the new batch task
     return {"message": "Задача суммаризации (пакетная) запущена.", "task_id": task.id}
 
 @api_v1_router.post("/run-daily-digest-task/", summary="Запустить задачу дайджеста")
-async def run_daily_digest_task_endpoint(): 
+async def run_daily_digest_task_endpoint():
     task = send_daily_digest_task.delay()
     return {"message": "Задача дайджеста запущена.", "task_id": task.id}
 
 @api_v1_router.post("/run-sentiment-analysis-task/", summary="Запустить задачу анализа тональности")
-async def run_sentiment_analysis_task_endpoint(): 
+async def run_sentiment_analysis_task_endpoint():
     # This endpoint might also need adjustment if it's meant to be more specific or use channel_ids
     # For now, it calls analyze_posts_sentiment_task without channel_ids, implying all active
     task = analyze_posts_sentiment_task.delay(limit_posts_to_analyze=settings.POST_FETCH_LIMIT or 5) # limit_posts_to_analyze might not be relevant if channel_ids is the new primary filter
     return {"message": "Задача анализа тональности запущена.", "task_id": task.id}
 
 @api_v1_router.post("/run-comment-feature-analysis/", summary="Запустить AI-анализ фич комментариев")
-async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le=1000, description="Количество комментариев для постановки в очередь на анализ")): 
+async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le=1000, description="Количество комментариев для постановки в очередь на анализ")):
     endpoint_logger.info(f"POST /run-comment-feature-analysis/ - limit={limit}")
     # This task is called per channel_id in the new batched endpoint.
     # Calling it here without a channel_id_filter implies it will queue for all channels, or based on its internal logic.
@@ -603,7 +603,7 @@ async def run_comment_feature_analysis_endpoint(limit: int = Query(100, ge=1, le
 
 # --- НОВЫЙ ЭНДПОИНТ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
 @api_v1_router.post(
-    "/run-advanced-data-refresh/", 
+    "/run-advanced-data-refresh/",
     response_model=ui_schemas.AdvancedDataRefreshResponse,
     summary="Запустить задачу продвинутого обновления данных",
     description="Запускает комплексную задачу сбора и обновления данных постов и комментариев с различными параметрами, с последующим AI-анализом новых комментариев."
@@ -612,31 +612,31 @@ async def run_advanced_data_refresh_endpoint(
     refresh_request: ui_schemas.AdvancedDataRefreshRequest,
 ):
     endpoint_logger.info(f"POST /run-advanced-data-refresh/ - params: {refresh_request.model_dump(exclude_none=True)}")
-    
+
     try:
         task = advanced_data_refresh_task.delay(
             channel_ids=refresh_request.channel_ids,
             post_refresh_mode_str=refresh_request.post_refresh_mode.value,
             post_refresh_days=refresh_request.post_refresh_days,
-            post_refresh_start_date_iso=refresh_request.post_refresh_start_date_str, 
+            post_refresh_start_date_iso=refresh_request.post_refresh_start_date_str,
             post_limit_per_channel=refresh_request.post_limit_per_channel,
             update_existing_posts_info=refresh_request.update_existing_posts_info,
             comment_refresh_mode_str=refresh_request.comment_refresh_mode.value,
             comment_limit_per_post=refresh_request.comment_limit_per_post,
             analyze_new_comments=refresh_request.analyze_new_comments
         )
-        
+
         endpoint_logger.info(f"Advanced data refresh task '{task.id}' enqueued.")
-        
+
         return ui_schemas.AdvancedDataRefreshResponse(
             message="Задача продвинутого обновления данных успешно поставлена в очередь.",
             task_id=task.id,
-            details=refresh_request.model_dump(exclude_none=True) 
+            details=refresh_request.model_dump(exclude_none=True)
         )
     except Exception as e:
         endpoint_logger.error(f"Ошибка при постановке задачи advanced_data_refresh_task в очередь: {e}", exc_info=True)
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Не удалось запустить задачу продвинутого обновления: {str(e)}"
         )
 
@@ -649,10 +649,10 @@ async def run_advanced_data_refresh_endpoint(
 )
 async def run_batched_ai_analysis_endpoint(
     request_data: ui_schemas.BatchedAIAnalysisRequest,
-    db: AsyncSession = Depends(get_async_db) 
+    db: AsyncSession = Depends(get_async_db)
 ):
     endpoint_logger.info(f"POST /run-batched-ai-analysis/ - params: {request_data.model_dump(exclude_none=True)}")
-    
+
     launched_tasks_info: List[ui_schemas.TaskInfo] = []
     channels_to_process_ids: List[int] = []
 
@@ -694,21 +694,21 @@ async def run_batched_ai_analysis_endpoint(
         logger.info(f"Задача анализа тональности постов запущена: {task_sentiment.id} (для каналов: {sentiment_task_input_channel_ids if sentiment_task_input_channel_ids else 'все активные'})")
 
         # 2. Запуск суммаризации постов
-        task_summary = summarize_posts_batch_task.delay(channel_ids=sentiment_task_input_channel_ids) 
+        task_summary = summarize_posts_batch_task.delay(channel_ids=sentiment_task_input_channel_ids)
         launched_tasks_info.append(ui_schemas.TaskInfo(task_type="summarization", task_id=task_summary.id))
         logger.info(f"Задача суммаризации постов запущена: {task_summary.id} (для каналов: {sentiment_task_input_channel_ids if sentiment_task_input_channel_ids else 'все активные'})")
 
         # 3. Запуск постановки комментариев в очередь на анализ (для каждого канала из channels_to_process_ids)
-        if channels_to_process_ids: 
+        if channels_to_process_ids:
             for channel_id in channels_to_process_ids:
                 task_enqueue_comments = enqueue_comments_for_ai_feature_analysis_task.delay(
                     channel_id_filter=channel_id,
-                    limit_comments_to_queue=settings.COMMENT_ENQUEUE_BATCH_SIZE, 
-                    process_only_recent_hours=None 
+                    limit_comments_to_queue=settings.COMMENT_ENQUEUE_BATCH_SIZE,
+                    process_only_recent_hours=None
                 )
                 launched_tasks_info.append(ui_schemas.TaskInfo(task_type="comment_feature_enqueue", task_id=task_enqueue_comments.id, channel_id_processed=channel_id))
                 logger.info(f"Задача постановки комментариев в очередь для AI-анализа (канал {channel_id}) запущена: {task_enqueue_comments.id}")
-        
+
         return ui_schemas.BatchedAIAnalysisResponse(
             message="Задачи пакетного AI-анализа успешно поставлены в очередь.",
             launched_tasks=launched_tasks_info
@@ -717,12 +717,288 @@ async def run_batched_ai_analysis_endpoint(
     except Exception as e:
         endpoint_logger.error(f"Ошибка при постановке задач пакетного AI-анализа в очередь: {e}", exc_info=True)
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Не удалось запустить задачи пакетного AI-анализа: {str(e)}"
         )
+
+# --- НОВЫЙ ЭНДПОИНТ ДЛЯ AI-АНАЛИЗА ПОСТОВ ЗА ПЕРИОД (Кнопка 4) ---
+@api_v1_router.post(
+    "/run-periodical-post-analysis/",
+    response_model=ui_schemas.PeriodicalPostAnalysisResponse,
+    summary="Запустить AI-анализ постов за указанный период",
+    description="Запускает анализ тональности и суммаризацию для непроанализированных постов в указанных каналах (или всех активных, если каналы не указаны) за заданный период. Каждая задача обрабатывает одну пачку данных."
+)
+async def run_periodical_post_analysis_endpoint(
+    request_data: ui_schemas.PeriodicalPostAnalysisRequest,
+    db: AsyncSession = Depends(get_async_db) # Нужен, если channel_ids не указаны и задачи потребуют фильтрации по активным каналам
+):
+    endpoint_logger.info(f"POST /run-periodical-post-analysis/ - params: {request_data.model_dump(exclude_none=True)}")
+
+    launched_tasks_info: List[ui_schemas.TaskInfo] = []
+
+    # Валидация дат
+    try:
+        start_date_obj = date.fromisoformat(request_data.start_date_str)
+        end_date_obj = date.fromisoformat(request_data.end_date_str)
+        if start_date_obj > end_date_obj:
+            raise HTTPException(status_code=400, detail="start_date не может быть позже end_date.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат даты. Ожидается YYYY-MM-DD.")
+
+    # Определяем, для каких каналов запускать (либо указанные, либо None для всех, задачи сами разберутся)
+    channel_ids_for_tasks: Optional[List[int]] = None
+    if request_data.channel_ids and any(request_data.channel_ids):
+        channel_ids_for_tasks = request_data.channel_ids
+        logger.info(f"Анализ постов за период для каналов: {channel_ids_for_tasks}, Период: {start_date_obj.isoformat()} - {end_date_obj.isoformat()}")
+    else:
+        logger.info(f"Анализ постов за период для ВСЕХ каналов (фильтрация по активности в задачах, если есть), Период: {start_date_obj.isoformat()} - {end_date_obj.isoformat()}")
+
+    try:
+        # Запускаем анализ тональности
+        task_sentiment = analyze_posts_sentiment_task.delay(
+            channel_ids=channel_ids_for_tasks,
+            start_date_iso=request_data.start_date_str,
+            end_date_iso=request_data.end_date_str
+        )
+        launched_tasks_info.append(ui_schemas.TaskInfo(task_type="periodical_sentiment_analysis", task_id=task_sentiment.id))
+        logger.info(f"Задача анализа тональности постов за период запущена: {task_sentiment.id}")
+
+        # Запускаем суммаризацию
+        task_summary = summarize_posts_batch_task.delay(
+            channel_ids=channel_ids_for_tasks,
+            start_date_iso=request_data.start_date_str,
+            end_date_iso=request_data.end_date_str
+        )
+        launched_tasks_info.append(ui_schemas.TaskInfo(task_type="periodical_summarization", task_id=task_summary.id))
+        logger.info(f"Задача суммаризации постов за период запущена: {task_summary.id}")
+
+        return ui_schemas.PeriodicalPostAnalysisResponse(
+            message="Задачи AI-анализа постов за период успешно поставлены в очередь.",
+            launched_tasks=launched_tasks_info
+        )
+    except Exception as e:
+        endpoint_logger.error(f"Ошибка при постановке задач AI-анализа постов за период: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Не удалось запустить задачи AI-анализа постов за период: {str(e)}"
+        )
+
+# --- НОВЫЙ ЭНДПОИНТ ДЛЯ AI-АНАЛИЗА КОММЕНТАРИЕВ ЗА ПЕРИОД (Кнопка 5) ---
+@api_v1_router.post(
+    "/run-periodical-comment-analysis/",
+    response_model=ui_schemas.PeriodicalCommentAnalysisResponse,
+    summary="Запустить AI-анализ (заглушки) комментариев к постам за указанный период",
+    description="Запускает постановку в очередь на AI-анализ (заглушки) для непроанализированных комментариев, чьи родительские посты были опубликованы в указанных каналах (или всех активных) за заданный период."
+)
+async def run_periodical_comment_analysis_endpoint(
+    request_data: ui_schemas.PeriodicalCommentAnalysisRequest,
+    db: AsyncSession = Depends(get_async_db) # Нужен для получения списка активных каналов
+):
+    endpoint_logger.info(f"POST /run-periodical-comment-analysis/ - params: {request_data.model_dump(exclude_none=True)}")
+
+    launched_tasks_info: List[ui_schemas.TaskInfo] = []
+
+    try:
+        start_date_val = date.fromisoformat(request_data.start_date_str)
+        end_date_val = date.fromisoformat(request_data.end_date_str)
+        if start_date_val > end_date_val:
+            raise HTTPException(status_code=400, detail="start_date не может быть позже end_date.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат даты. Ожидается YYYY-MM-DD.")
+
+    channels_to_process_ids: List[int] = []
+    if request_data.channel_ids and any(request_data.channel_ids):
+        stmt_check_channels = select(Channel.id).where(Channel.id.in_(request_data.channel_ids)).where(Channel.is_active == True)
+        active_requested_channels_result = await db.execute(stmt_check_channels)
+        channels_to_process_ids = active_requested_channels_result.scalars().all()
+        if not channels_to_process_ids:
+            return ui_schemas.PeriodicalCommentAnalysisResponse(
+                message="Не найдено активных каналов среди запрошенных для анализа.",
+                launched_tasks=[]
+            )
+        logger.info(f"Анализ комментариев за период будет выполнен для указанных активных каналов: {channels_to_process_ids}, Период постов: {start_date_val.isoformat()} - {end_date_val.isoformat()}")
+    else:
+        active_channels_stmt = select(Channel.id).where(Channel.is_active == True)
+        active_channels_result = await db.execute(active_channels_stmt)
+        channels_to_process_ids = active_channels_result.scalars().all()
+        if not channels_to_process_ids:
+            return ui_schemas.PeriodicalCommentAnalysisResponse(
+                message="В системе нет активных каналов для анализа.",
+                launched_tasks=[]
+            )
+        logger.info(f"Анализ комментариев за период будет выполнен для ВСЕХ ({len(channels_to_process_ids)}) активных каналов, Период постов: {start_date_val.isoformat()} - {end_date_val.isoformat()}")
+
+    try:
+        for channel_id in channels_to_process_ids:
+            task_enqueue_comments = enqueue_comments_for_ai_feature_analysis_task.delay(
+                channel_id_filter=channel_id,
+                start_date_iso=request_data.start_date_str,
+                end_date_iso=request_data.end_date_str,
+                limit_comments_to_queue=settings.COMMENT_ENQUEUE_BATCH_SIZE, # Пачка для одной задачи enqueue
+                process_only_recent_hours=None # Анализируем весь бэклог непроанализированных в периоде
+            )
+            launched_tasks_info.append(ui_schemas.TaskInfo(
+                task_type="periodical_comment_feature_enqueue",
+                task_id=task_enqueue_comments.id,
+                channel_id_processed=channel_id
+            ))
+            logger.info(f"Задача постановки комментариев в очередь (канал {channel_id}, период) запущена: {task_enqueue_comments.id}")
+
+        return ui_schemas.PeriodicalCommentAnalysisResponse(
+            message="Задачи AI-анализа (заглушек) комментариев за период успешно поставлены в очередь.",
+            launched_tasks=launched_tasks_info
+        )
+    except Exception as e:
+        endpoint_logger.error(f"Ошибка при постановке задач AI-анализа комментариев за период: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Не удалось запустить задачи AI-анализа комментариев за период: {str(e)}"
+        )
+
+# --- НОВЫЙ ЭНДПОИНТ ДЛЯ ГЕНЕРАЦИИ АНАЛИТИЧЕСКОГО ОТЧЕТА (Кнопка 6) ---
+@api_v1_router.post(
+    "/generate-analytical-report/",
+    response_model=ui_schemas.AnalyticalReportResponse,
+    summary="Сгенерировать аналитический отчет по данным за период",
+    description="Собирает агрегированные данные (топ-темы, проблемы и т.д. из комментариев, статистику) за указанный период и каналы, затем использует LLM для генерации текстового отчета."
+)
+async def generate_analytical_report_endpoint(
+    request_data: ui_schemas.AnalyticalReportRequest,
+    db: AsyncSession = Depends(get_async_db)
+):
+    endpoint_logger.info(f"POST /generate-analytical-report/ - params: {request_data.model_dump(exclude_none=True)}")
+
+    try:
+        start_date_report = date.fromisoformat(request_data.start_date_str)
+        end_date_report = date.fromisoformat(request_data.end_date_str)
+
+        # 1. Определяем каналы для обработки
+        active_channels_subquery_report: Optional[Any] = None # Будет subquery или None
+        channel_filter_applied = False
+
+        if request_data.channel_ids and any(request_data.channel_ids):
+            stmt_check_channels = select(Channel.id).where(Channel.id.in_(request_data.channel_ids)).where(Channel.is_active == True)
+            active_requested_channels_result = await db.execute(stmt_check_channels)
+            active_ids = active_requested_channels_result.scalars().all()
+            if not active_ids:
+                return ui_schemas.AnalyticalReportResponse(
+                    report_text="Не найдено активных каналов среди запрошенных для генерации отчета.",
+                    data_summary_for_report={"error": "No active channels found from request."}
+                )
+            active_channels_subquery_report = select(models_module.Channel.id).where(models_module.Channel.id.in_(active_ids)).subquery("active_channels_for_report")
+            channel_filter_applied = True
+            logger.info(f"Генерация отчета для каналов: {active_ids}, Период: {start_date_report.isoformat()} - {end_date_report.isoformat()}")
+        else:
+            active_channels_subquery_report = select(models_module.Channel.id).where(models_module.Channel.is_active == True).subquery("active_channels_for_report")
+            logger.info(f"Генерация отчета для ВСЕХ активных каналов, Период: {start_date_report.isoformat()} - {end_date_report.isoformat()}")
+
+        # 2. Сбор агрегированных данных (базовая версия)
+        data_for_llm_summary: Dict[str, Any] = {
+            "period_start": start_date_report.isoformat(),
+            "period_end": end_date_report.isoformat(),
+            "channels_info": "Выбранные каналы" if channel_filter_applied else "Все активные каналы",
+            "top_n_insights": request_data.top_n_insights
+        }
+
+        start_datetime = datetime(start_date_report.year, start_date_report.month, start_date_report.day, 0, 0, 0, tzinfo=timezone.utc)
+        end_datetime = datetime(end_date_report.year, end_date_report.month, end_date_report.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+        async def fetch_top_jsonb_array_elements_for_report(jsonb_field_name: str) -> List[Dict[str, Any]]:
+            comment_jsonb_field = getattr(models_module.Comment, jsonb_field_name)
+            item_text_expression = func.jsonb_array_elements_text(comment_jsonb_field).label("item_text")
+
+            stmt = (
+                select(item_text_expression, func.count().label("item_count"))
+                .select_from(models_module.Comment)
+                .join(models_module.Post, models_module.Comment.post_id == models_module.Post.id)
+                .join(active_channels_subquery_report, models_module.Post.channel_id == active_channels_subquery_report.c.id)
+                .where(models_module.Comment.commented_at >= start_datetime)
+                .where(models_module.Comment.commented_at <= end_datetime)
+                .where(models_module.Comment.ai_analysis_completed_at.isnot(None))
+                .where(comment_jsonb_field.isnot(None))
+                .where(func.jsonb_typeof(comment_jsonb_field) == 'array')
+                .where(func.jsonb_array_length(comment_jsonb_field) > 0)
+                .group_by(item_text_expression)
+                .order_by(desc(literal_column("item_count")), literal_column("item_text").asc())
+                .limit(request_data.top_n_insights)
+            )
+            results = await db.execute(stmt)
+            return [{"text": str(row.item_text), "count": row.item_count} for row in results.all()]
+
+        data_for_llm_summary["top_topics"] = await fetch_top_jsonb_array_elements_for_report("extracted_topics")
+        data_for_llm_summary["top_problems"] = await fetch_top_jsonb_array_elements_for_report("extracted_problems")
+        data_for_llm_summary["top_questions"] = await fetch_top_jsonb_array_elements_for_report("extracted_questions")
+        data_for_llm_summary["top_suggestions"] = await fetch_top_jsonb_array_elements_for_report("extracted_suggestions")
+
+        # 3. Формирование контекста для LLM
+        context_lines = [
+            f"Аналитический отчет за период с {data_for_llm_summary['period_start']} по {data_for_llm_summary['period_end']}.",
+            f"Анализируемые каналы: {data_for_llm_summary['channels_info']}.",
+            f"Представлены топ-{data_for_llm_summary['top_n_insights']} элементов для каждой категории инсайтов из комментариев.",
+            "\nОсновные обсуждаемые темы:"
+        ]
+        if data_for_llm_summary["top_topics"]:
+            for item in data_for_llm_summary["top_topics"]: context_lines.append(f"- \"{item['text']}\" (упоминаний: {item['count']})")
+        else: context_lines.append("- Данные отсутствуют или не проанализированы.")
+
+        context_lines.append("\nКлючевые проблемы, озвученные пользователями:")
+        if data_for_llm_summary["top_problems"]:
+            for item in data_for_llm_summary["top_problems"]: context_lines.append(f"- \"{item['text']}\" (упоминаний: {item['count']})")
+        else: context_lines.append("- Данные отсутствуют или не проанализированы.")
+
+        context_lines.append("\nЧасто задаваемые вопросы:")
+        if data_for_llm_summary["top_questions"]:
+            for item in data_for_llm_summary["top_questions"]: context_lines.append(f"- \"{item['text']}\" (упоминаний: {item['count']})")
+        else: context_lines.append("- Данные отсутствуют или не проанализированы.")
+
+        context_lines.append("\nПредложения от аудитории:")
+        if data_for_llm_summary["top_suggestions"]:
+            for item in data_for_llm_summary["top_suggestions"]: context_lines.append(f"- \"{item['text']}\" (упоминаний: {item['count']})")
+        else: context_lines.append("- Данные отсутствуют или не проанализированы.")
+
+        llm_context = "\n".join(context_lines)
+
+        # 4. Формирование промпта для LLM
+        llm_prompt = (
+            f"Ты — AI-аналитик, специализирующийся на анализе обсуждений в Telegram-каналах. "
+            f"Твоя задача — на основе предоставленных агрегированных данных написать краткий (3-5 абзацев) связный аналитический отчет на русском языке.\n\n"
+            f"ДАННЫЕ ДЛЯ АНАЛИЗА:\n---\n{llm_context}\n---\n\n"
+            f"В отчете ОБЯЗАТЕЛЬНО:\n"
+            f"1. Кратко опиши общую картину обсуждений за указанный период для указанных каналов.\n"
+            f"2. Если есть данные по темам, выдели 1-2 самые главные темы, которые волновали аудиторию.\n"
+            f"3. Если есть данные по проблемам, укажи 1-2 наиболее существенные проблемы или боли, с которыми сталкивались пользователи.\n"
+            f"4. Если были интересные предложения, упомяни одно из них.\n"
+            f"5. Сделай общий вывод о настроениях или ключевых моментах в обсуждениях за этот период.\n"
+            f"Отвечай как профессиональный аналитик, ясно и по существу. Не выдумывай информацию, которой нет в предоставленных данных. Если по какому-то пункту данных нет, так и укажи (например, 'Предложений от аудитории в данный период выявлено не было')."
+            f"Не повторяй просто список данных, а синтезируй из них текстовый отчет."
+        )
+        endpoint_logger.info(f"Промпт для генерации отчета (начало):\n{llm_prompt[:500]}...")
+
+        # 5. Запрос к LLM
+        report_text = await одиночный_запрос_к_llm(
+            llm_prompt,
+            модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106",
+            температура=0.5,
+            макс_токены=1000,
+            is_json_response_expected=False
+        )
+        if not report_text:
+            report_text = "Не удалось сгенерировать отчет с помощью AI. Попробуйте позже или с другими параметрами."
+            logger.warning("LLM не вернул текст для аналитического отчета.")
+
+        return ui_schemas.AnalyticalReportResponse(
+            report_text=report_text,
+            data_summary_for_report=data_for_llm_summary
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e_main:
+        endpoint_logger.error(f"Общая ошибка при генерации аналитического отчета: {e_main}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при генерации отчета: {e_main}")
 
 app.include_router(api_v1_router)
 
 @app.get("/")
-async def root(): 
+async def root():
     return {"message": f"Welcome to {settings.PROJECT_NAME} API. Version: 0.1.0"}
