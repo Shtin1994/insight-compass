@@ -56,6 +56,8 @@ except ImportError as e:
     def enqueue_comments_for_ai_feature_analysis_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_comment_ai'})()
     def advanced_data_refresh_task(*args, **kwargs): return type('obj', (object,), {'id': 'fake_task_id_advanced_refresh'})()
 
+from celery.result import AsyncResult # NEW: For task status endpoint
+from pydantic import BaseModel # NEW: For TaskStatusResponse schema
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__) # Используем стандартный логгер для модуля
@@ -143,6 +145,13 @@ async def shutdown_event():
 
 
 api_v1_router = APIRouter(prefix=settings.API_V1_STR)
+
+# --- Схема для ответа о статусе задачи ---
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[Any] = None # Может быть результат задачи или информация об ошибке/прогрессе
+    meta: Optional[Dict[str, Any]] = None # Для прогресса из self.update_state
 
 @api_v1_router.post("/channels/", response_model=ui_schemas.ChannelResponse, status_code=201)
 async def add_new_channel(channel_data: ui_schemas.ChannelCreateRequest, db: AsyncSession = Depends(get_async_db), tg_client: TelegramClient = Depends(get_telegram_client)):
@@ -996,6 +1005,60 @@ async def generate_analytical_report_endpoint(
     except Exception as e_main:
         endpoint_logger.error(f"Общая ошибка при генерации аналитического отчета: {e_main}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при генерации отчета: {e_main}")
+
+
+# --- НОВЫЙ ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ СТАТУСА CELERY ЗАДАЧИ ---
+@api_v1_router.get("/task-status/{task_id}", response_model=TaskStatusResponse, summary="Получить статус Celery задачи")
+async def get_task_status_endpoint(task_id: str):
+    endpoint_logger.info(f"GET /task-status/{task_id}")
+    task_result = AsyncResult(task_id, app=celery_instance) # Используем наш celery_instance
+
+    response_data = {
+        "task_id": task_id,
+        "status": task_result.status,
+        "result": None, # Initialize with None
+        "meta": None    # Initialize with None
+    }
+
+    if task_result.successful():
+        response_data["result"] = task_result.get() # Получаем результат, если задача успешно завершена
+        # Если в info есть что-то помимо результата (например, meta от update_state), добавим это
+        if isinstance(task_result.info, dict):
+            response_data["meta"] = task_result.info
+        elif task_result.info is not None and task_result.info != response_data["result"]: # Если info не dict, но содержит что-то еще и не дублирует результат
+             response_data["meta"] = {"raw_info": task_result.info}
+
+    elif task_result.failed():
+        # Если задача упала, result будет исключением. info может содержать traceback.
+        # Мы хотим вернуть более user-friendly сообщение, если возможно, или детали ошибки.
+        error_info = {
+            "error_type": type(task_result.result).__name__ if task_result.result else "UnknownError",
+            "message": str(task_result.result) if task_result.result else "No error message."
+        }
+        # task_result.traceback содержит полный стектрейс, его можно логировать, но не всегда безопасно отдавать на фронт
+        logger.debug(f"Task {task_id} failed. Traceback: {task_result.traceback}") # Логируем для отладки
+        response_data["result"] = error_info # Возвращаем структурированную ошибку
+        if isinstance(task_result.info, dict): # Если задача успела что-то записать в info до падения
+            response_data["meta"] = task_result.info
+        elif task_result.info: # Если info не dict, но содержит что-то еще
+             response_data["meta"] = {"raw_info_on_failure": task_result.info}
+
+    elif task_result.status in ['PENDING', 'STARTED', 'RETRY', 'PROGRESS']:
+        # Для задач в процессе, result обычно None, но info может содержать метаданные прогресса
+        if isinstance(task_result.info, dict):
+            response_data["meta"] = task_result.info
+            response_data["result"] = task_result.info # Для задач с PROGRESS, result может быть тем же, что и info.
+        elif task_result.info is not None:
+             response_data["result"] = task_result.info # Или просто info, если оно не dict
+
+    else: # Другие возможные статусы (REVOKED и т.д.)
+        response_data["result"] = str(task_result.info) if task_result.info else "No additional info."
+        if isinstance(task_result.info, dict): # Также добавим мету, если она есть
+            response_data["meta"] = task_result.info
+
+
+    return TaskStatusResponse(**response_data)
+
 
 app.include_router(api_v1_router)
 

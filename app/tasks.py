@@ -452,9 +452,9 @@ def collect_telegram_data_task(self):
 
 @celery_instance.task(name="summarize_posts_batch", bind=True, max_retries=2, default_retry_delay=300)
 def summarize_posts_batch_task(
-    self, 
+    self,
     channel_ids: Optional[List[int]] = None,
-    start_date_iso: Optional[str] = None, 
+    start_date_iso: Optional[str] = None,
     end_date_iso: Optional[str] = None,
 ):
     limit_posts_to_process = settings.POST_SUMMARY_BATCH_SIZE
@@ -464,112 +464,209 @@ def summarize_posts_batch_task(
     if start_date_iso: log_prefix_parts.append(f"Start:{start_date_iso}")
     if end_date_iso: log_prefix_parts.append(f"End:{end_date_iso}")
     log_prefix = "".join(log_prefix_parts) + "]"
-    
+
     logger.info(f"{log_prefix} Запущен Celery таск '{self.name}' (ID: {self.request.id}). Лимит пачки: {limit_posts_to_process}.")
 
     if not settings.OPENAI_API_KEY:
         logger.error(f"{log_prefix} Ошибка: OPENAI_API_KEY не настроен.")
-        return "Config error: OpenAI Key not configured."
+        self.update_state(state='FAILURE', meta={'current_step': 'Ошибка конфигурации', 'error': 'OpenAI API Key не настроен.', 'progress': 0, 'processed_count':0, 'total_to_process':0})
+        return "Config error: OpenAI Key not configured." # Этот return все еще актуален, так как задача не может продолжиться
 
-    async def _async_logic():
-        processed_count_in_batch = 0
-        local_engine = None 
+    progress_info_ref: Dict[str, Any] = {
+        "processed_count": 0,
+        "total_to_process": 0,
+        "current_step": "Инициализация задачи суммаризации",
+        "progress": 0
+    }
+
+    async def _async_logic(task_instance, current_progress_info_ref: Dict[str, Any]):
+        processed_count_in_batch = 0 # Фактически суммаризированных или помеченных как обработанные
+        total_posts_for_batch = 0
+        local_engine = None
+
+        current_progress_info_ref.update({
+            'current_step': 'Подготовка к суммаризации постов',
+            'progress': 5,
+            'processed_count': 0,
+            'total_to_process': 0
+        })
+        task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
+            ASYNC_DB_URL_TASK = settings.DATABASE_URL
             if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
                 ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
+
             local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
             LocalAsyncSessionFactory_Task = sessionmaker(
                 bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
             )
             logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
 
-            async with LocalAsyncSessionFactory_Task() as db_session: 
+            async with LocalAsyncSessionFactory_Task() as db_session:
                 stmt = (
                     select(Post)
-                    .where(Post.summary_text.is_(None)) 
-                    .where(or_(Post.text_content.isnot(None), Post.caption_text.isnot(None)))
-                    .order_by(Post.posted_at.asc()) 
+                    .where(Post.summary_text.is_(None))
+                    .where(or_(Post.text_content.isnot(None), Post.caption_text.isnot(None))) # Есть что суммаризировать
+                    .order_by(Post.posted_at.asc())
                     .limit(limit_posts_to_process)
                 )
 
                 if channel_ids:
                     logger.info(f"{log_prefix} Суммаризация для каналов: {channel_ids}")
                     stmt = stmt.where(Post.channel_id.in_(channel_ids))
-                else: 
+                else:
                     logger.info(f"{log_prefix} Суммаризация для всех активных каналов (если даты не указаны).")
                     if not start_date_iso and not end_date_iso:
                          active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery()
                          stmt = stmt.join(active_channels_subquery, Post.channel_id == active_channels_subquery.c.id)
-                
+
                 if start_date_iso:
-                    dt_start = datetime.fromisoformat(start_date_iso.split('T')[0]).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                    dt_start_naive = date.fromisoformat(start_date_iso.split('T')[0])
+                    dt_start = datetime(dt_start_naive.year, dt_start_naive.month, dt_start_naive.day, 0, 0, 0, 0, tzinfo=timezone.utc)
                     stmt = stmt.where(Post.posted_at >= dt_start)
                     logger.info(f"{log_prefix} Применен фильтр start_date: {dt_start}")
                 if end_date_iso:
-                    dt_end_naive = datetime.fromisoformat(end_date_iso.split('T')[0])
+                    dt_end_naive = date.fromisoformat(end_date_iso.split('T')[0])
                     dt_end = datetime(dt_end_naive.year, dt_end_naive.month, dt_end_naive.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
                     stmt = stmt.where(Post.posted_at <= dt_end)
                     logger.info(f"{log_prefix} Применен фильтр end_date: {dt_end}")
 
                 posts_to_process_result = await db_session.execute(stmt)
                 posts_to_process = posts_to_process_result.scalars().all()
+                total_posts_for_batch = len(posts_to_process)
+                current_progress_info_ref['total_to_process'] = total_posts_for_batch
+
+                logger.info(f"{log_prefix} Найдено {total_posts_for_batch} постов для суммаризации в этой пачке.")
+                current_progress_info_ref.update({
+                    'current_step': f'Найдено {total_posts_for_batch} постов для суммаризации',
+                    'progress': 10
+                })
+                task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
 
                 if not posts_to_process:
                     logger.info(f"{log_prefix} Не найдено постов для суммаризации в текущей пачке.")
-                    return "Нет постов для суммаризации в этой пачке."
+                    result_message = "Нет постов для суммаризации в этой пачке."
+                    current_progress_info_ref.update({
+                        'current_step': 'Завершено: нет постов для суммаризации',
+                        'progress': 100,
+                        'result_summary': result_message
+                    })
+                    task_instance.update_state(state='SUCCESS', meta=current_progress_info_ref)
+                    return result_message
 
-                logger.info(f"{log_prefix} Найдено {len(posts_to_process)} постов для суммаризации в этой пачке.")
-                for post_obj in posts_to_process:
+                for i, post_obj in enumerate(posts_to_process):
                     text_to_summarize = post_obj.caption_text if post_obj.caption_text and post_obj.caption_text.strip() else post_obj.text_content
-                    if not text_to_summarize or len(text_to_summarize.strip()) < 30: 
+                    
+                    # Пропускаем суммаризацию для слишком коротких постов или постов без текста
+                    # но помечаем их как обработанные (с пустым резюме), чтобы не выбирать снова
+                    if not text_to_summarize or len(text_to_summarize.strip()) < (settings.MIN_POST_LENGTH_FOR_SUMMARY or 30):
                         logger.info(f"{log_prefix}  Пост ID {post_obj.id} ({post_obj.link}) слишком короткий или без текста. Суммаризация пропущена, помечаем как обработанный (пустым резюме).")
-                        post_obj.summary_text = ""; post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); processed_count_in_batch +=1
-                        continue
-                    logger.info(f"{log_prefix}  Суммаризация поста ID {post_obj.id} ({post_obj.link})...")
-                    try:
-                        summary_prompt = f"Текст поста:\n---\n{text_to_summarize[:settings.LLM_MAX_PROMPT_LENGTH]}\n---\nНапиши краткое резюме (1-3 предложения на русском) основной мысли этого поста."
-                        summary = await одиночный_запрос_к_llm(summary_prompt, модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo", температура=0.3, макс_токены=250, is_json_response_expected=False)
-                        if summary and summary.strip():
-                            post_obj.summary_text = summary.strip(); post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); processed_count_in_batch += 1
-                            logger.info(f"{log_prefix}    Резюме для поста ID {post_obj.id} получено и сохранено.")
-                        else:
-                            logger.warning(f"{log_prefix}    LLM не вернул текст резюме для поста ID {post_obj.id}. Помечаем как обработанный (пустым резюме).")
-                            post_obj.summary_text = ""; post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); processed_count_in_batch +=1
-                    except OpenAIError as e_llm: logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при суммаризации поста ID {post_obj.id}: {type(e_llm).__name__} - {e_llm}"); continue 
-                    except Exception as e_sum: logger.error(f"{log_prefix}    !!! Неожиданная ошибка при суммаризации поста ID {post_obj.id}: {type(e_sum).__name__} - {e_sum}", exc_info=True); continue
+                        post_obj.summary_text = "" # Пустая строка означает, что пост был рассмотрен, но не суммаризирован
+                        post_obj.updated_at = datetime.now(timezone.utc)
+                        db_session.add(post_obj)
+                        processed_count_in_batch += 1
+                        current_progress_info_ref['processed_count'] = processed_count_in_batch
+                    else:
+                        logger.info(f"{log_prefix}  Суммаризация поста ID {post_obj.id} ({post_obj.link})...")
+                        try:
+                            summary_prompt = f"Текст поста:\n---\n{text_to_summarize[:settings.LLM_MAX_PROMPT_LENGTH]}\n---\nНапиши краткое резюме (1-3 предложения на русском) основной мысли этого поста."
+                            summary = await одиночный_запрос_к_llm(
+                                summary_prompt,
+                                модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo",
+                                температура=0.3,
+                                макс_токены=settings.LLM_SUMMARY_MAX_TOKENS or 250, # Используем настройку или дефолт
+                                is_json_response_expected=False
+                            )
+                            if summary and summary.strip():
+                                post_obj.summary_text = summary.strip()
+                                post_obj.updated_at = datetime.now(timezone.utc)
+                                db_session.add(post_obj)
+                                processed_count_in_batch += 1
+                                current_progress_info_ref['processed_count'] = processed_count_in_batch
+                                logger.info(f"{log_prefix}    Резюме для поста ID {post_obj.id} получено и сохранено.")
+                            else:
+                                logger.warning(f"{log_prefix}    LLM не вернул текст резюме для поста ID {post_obj.id}. Помечаем как обработанный (пустым резюме).")
+                                post_obj.summary_text = "" # Пустая строка
+                                post_obj.updated_at = datetime.now(timezone.utc)
+                                db_session.add(post_obj)
+                                processed_count_in_batch += 1 # Все равно считаем обработанным
+                                current_progress_info_ref['processed_count'] = processed_count_in_batch
+
+                        except OpenAIError as e_llm:
+                            logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при суммаризации поста ID {post_obj.id}: {type(e_llm).__name__} - {e_llm}")
+                            # Пропускаем этот пост, он останется без резюме для этой попытки
+                            continue
+                        except Exception as e_sum:
+                            logger.error(f"{log_prefix}    !!! Неожиданная ошибка при суммаризации поста ID {post_obj.id}: {type(e_sum).__name__} - {e_sum}", exc_info=True)
+                            continue # Пропускаем этот пост
+
+                    # Обновление состояния прогресса периодически или в конце
+                    if (i + 1) % 10 == 0 or (i + 1) == total_posts_for_batch:
+                        current_progress_percentage = 10 + int(((i + 1) / total_posts_for_batch) * 85) if total_posts_for_batch > 0 else 95
+                        current_progress_info_ref.update({
+                            'current_step': f'Суммаризация: обработано {processed_count_in_batch}/{total_posts_for_batch} (просмотрено {i+1})',
+                            'progress': current_progress_percentage
+                        })
+                        task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
                 
-                if processed_count_in_batch > 0: 
+                # Коммит, если были какие-либо изменения (суммаризированные или помеченные как обработанные пустые/короткие посты)
+                if processed_count_in_batch > 0: # processed_count_in_batch инкрементируется в обоих случаях (успех LLM или пропуск короткого)
                     await db_session.commit()
                     logger.info(f"{log_prefix}  Обработано (суммаризировано/пропущено) {processed_count_in_batch} постов в этой пачке.")
 
-            return f"Суммаризация для пачки завершена. Обработано (суммаризировано/пропущено): {processed_count_in_batch} постов."
+            result_message = f"Суммаризация для пачки завершена. Обработано (суммаризировано/пропущено): {processed_count_in_batch} из {total_posts_for_batch} постов."
+            current_progress_info_ref.update({
+                'current_step': 'Завершено',
+                'progress': 100,
+                'result_summary': result_message
+            })
+            task_instance.update_state(state='SUCCESS', meta=current_progress_info_ref)
+            return result_message
         except Exception as e_async_main:
             logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в _async_logic: {type(e_async_main).__name__} - {e_async_main}", exc_info=True)
+            current_progress_info_ref.update({
+                'current_step': f'Критическая ошибка в async_logic: {type(e_async_main).__name__}',
+                'error': str(e_async_main)
+            })
             raise
-        finally: 
+        finally:
             if local_engine:
                 logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
                 await local_engine.dispose()
 
     try:
-        result_message = asyncio.run(_async_logic())
+        result_message = asyncio.run(_async_logic(self, progress_info_ref))
         task_duration = time.time() - task_start_time
         logger.info(f"{log_prefix} Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
         return result_message
     except Exception as e_task_main:
         task_duration = time.time() - task_start_time
         logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_main).__name__} - {e_task_main}", exc_info=True)
+
+        failure_meta = {
+            'current_step': progress_info_ref.get('current_step', 'Ошибка суммаризации'),
+            'error': str(e_task_main),
+            'progress': progress_info_ref.get('progress', 0),
+            'processed_count': progress_info_ref.get('processed_count', 0),
+            'total_to_process': progress_info_ref.get('total_to_process', 0)
+        }
+        failure_meta['progress'] = 100
+        failure_meta['current_step'] = f"Ошибка: {failure_meta['current_step']}"
+
+        self.update_state(state='FAILURE', meta=failure_meta)
+
         try:
             if self.request.retries < self.max_retries:
+                logger.info(f"{log_prefix} Попытка повтора задачи {self.request.id} ({self.request.retries + 1}/{self.max_retries}). Задержка: {int(self.default_retry_delay * (2 ** self.request.retries))} сек.")
                 raise self.retry(exc=e_task_main, countdown=int(self.default_retry_delay * (2 ** self.request.retries)))
             else:
                 logger.error(f"{log_prefix} Celery: Max retries ({self.max_retries}) достигнуто для таска {self.request.id}.")
-                raise e_task_main
+                # Исключение e_task_main "выпадет", Celery обработает его.
         except Exception as e_retry_logic:
             logger.error(f"{log_prefix} Celery: Исключение в логике retry для таска {self.request.id}: {type(e_retry_logic).__name__}", exc_info=True)
-            raise e_task_main
+            self.update_state(state='FAILURE', meta={**failure_meta, 'error': f"Retry logic failed: {str(e_retry_logic)}. Original error: {str(e_task_main)}"})
+            raise
 
 @celery_instance.task(name="send_daily_digest", bind=True, max_retries=3, default_retry_delay=180)
 def send_daily_digest_task(self, hours_ago_posts=24, top_n_metrics=3):
@@ -674,9 +771,9 @@ def send_daily_digest_task(self, hours_ago_posts=24, top_n_metrics=3):
 
 @celery_instance.task(name="analyze_posts_sentiment", bind=True, max_retries=2, default_retry_delay=300)
 def analyze_posts_sentiment_task(
-    self, 
+    self,
     channel_ids: Optional[List[int]] = None,
-    start_date_iso: Optional[str] = None, 
+    start_date_iso: Optional[str] = None,
     end_date_iso: Optional[str] = None,
 ):
     limit_posts_to_process = settings.POST_ANALYSIS_BATCH_SIZE
@@ -686,34 +783,53 @@ def analyze_posts_sentiment_task(
     if start_date_iso: log_prefix_parts.append(f"Start:{start_date_iso}")
     if end_date_iso: log_prefix_parts.append(f"End:{end_date_iso}")
     log_prefix = "".join(log_prefix_parts) + "]"
-    
+
     logger.info(f"{log_prefix} Запущен Celery таск '{self.name}' (ID: {self.request.id}). Лимит пачки: {limit_posts_to_process}.")
-    
+
     if not settings.OPENAI_API_KEY:
         logger.error(f"{log_prefix} Ошибка: OPENAI_API_KEY не настроен.")
+        self.update_state(state='FAILURE', meta={'current_step': 'Ошибка конфигурации', 'error': 'OpenAI API Key не настроен.', 'progress': 0, 'processed_count':0, 'total_to_process':0})
         return "Config error: OpenAI Key not configured."
 
-    async def _async_logic():
+    # progress_info будет обновляться _async_logic и использоваться основной задачей для состояния FAILURE
+    progress_info_ref: Dict[str, Any] = {
+        "processed_count": 0,
+        "total_to_process": 0,
+        "current_step": "Инициализация задачи",
+        "progress": 0
+    }
+
+    async def _async_logic(task_instance, current_progress_info_ref: Dict[str, Any]):
         analyzed_count_in_batch = 0
-        local_engine = None 
+        total_posts_for_batch = 0
+        local_engine = None
+
+        current_progress_info_ref.update({
+            'current_step': 'Подготовка к анализу тональности постов',
+            'progress': 5,
+            'processed_count': 0,
+            'total_to_process': 0
+        })
+        task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
+            ASYNC_DB_URL_TASK = settings.DATABASE_URL
             if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
                 ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
+
             local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
             LocalAsyncSessionFactory_Task = sessionmaker(
                 bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
             )
             logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
 
-            async with LocalAsyncSessionFactory_Task() as db_session: 
+            async with LocalAsyncSessionFactory_Task() as db_session:
                 stmt = (
                     select(Post)
                     .where(or_(Post.text_content.isnot(None), Post.caption_text.isnot(None)))
-                    .where(Post.post_sentiment_label.is_(None)) 
-                    .order_by(Post.posted_at.asc()) 
-                    .limit(limit_posts_to_process) 
+                    .where(Post.post_sentiment_label.is_(None))
+                    .order_by(Post.posted_at.asc())
+                    .limit(limit_posts_to_process)
                 )
 
                 if channel_ids:
@@ -721,29 +837,48 @@ def analyze_posts_sentiment_task(
                     stmt = stmt.where(Post.channel_id.in_(channel_ids))
                 else:
                     logger.info(f"{log_prefix} Анализ для всех активных каналов (если даты не указаны).")
-                    if not start_date_iso and not end_date_iso: 
+                    if not start_date_iso and not end_date_iso:
                          active_channels_subquery = select(Channel.id).where(Channel.is_active == True).subquery()
                          stmt = stmt.join(active_channels_subquery, Post.channel_id == active_channels_subquery.c.id)
-                
+
                 if start_date_iso:
-                    dt_start = datetime.fromisoformat(start_date_iso.split('T')[0]).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                    # ИЗМЕНЕНО: используется date.fromisoformat
+                    dt_start_naive = date.fromisoformat(start_date_iso.split('T')[0])
+                    dt_start = datetime(dt_start_naive.year, dt_start_naive.month, dt_start_naive.day, 0, 0, 0, 0, tzinfo=timezone.utc)
                     stmt = stmt.where(Post.posted_at >= dt_start)
                     logger.info(f"{log_prefix} Применен фильтр start_date: {dt_start}")
                 if end_date_iso:
-                    dt_end_naive = datetime.fromisoformat(end_date_iso.split('T')[0])
+                    # ИЗМЕНЕНО: используется date.fromisoformat
+                    dt_end_naive = date.fromisoformat(end_date_iso.split('T')[0])
                     dt_end = datetime(dt_end_naive.year, dt_end_naive.month, dt_end_naive.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
                     stmt = stmt.where(Post.posted_at <= dt_end)
                     logger.info(f"{log_prefix} Применен фильтр end_date: {dt_end}")
-                    
+
                 posts_to_process_result = await db_session.execute(stmt)
                 posts_to_process = posts_to_process_result.scalars().all()
+                total_posts_for_batch = len(posts_to_process)
+                current_progress_info_ref['total_to_process'] = total_posts_for_batch
+
+                logger.info(f"{log_prefix} Найдено {total_posts_for_batch} постов для анализа в этой пачке.")
+                current_progress_info_ref.update({
+                    'current_step': f'Найдено {total_posts_for_batch} постов для анализа',
+                    'progress': 10,
+                })
+                task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
 
                 if not posts_to_process:
                     logger.info(f"{log_prefix} Не найдено постов для анализа тональности в текущей пачке.")
-                    return "Нет постов для анализа в этой пачке."
+                    result_message = "Нет постов для анализа в этой пачке."
+                    current_progress_info_ref.update({
+                        'current_step': 'Завершено: нет постов для анализа',
+                        'progress': 100,
+                        'result_summary': result_message
+                    })
+                    task_instance.update_state(state='SUCCESS', meta=current_progress_info_ref)
+                    return result_message
 
-                logger.info(f"{log_prefix} Найдено {len(posts_to_process)} постов для анализа в этой пачке.")
-                for post_obj in posts_to_process:
+                for i, post_obj in enumerate(posts_to_process):
                     text_for_analysis = post_obj.caption_text if post_obj.caption_text and post_obj.caption_text.strip() else post_obj.text_content
                     if not text_for_analysis or not text_for_analysis.strip():
                         logger.info(f"{log_prefix}  Пост ID {post_obj.id} ({post_obj.link}) не имеет текста/подписи или текст пустой. Помечаем как 'neutral' без вызова LLM.")
@@ -751,60 +886,123 @@ def analyze_posts_sentiment_task(
                         post_obj.post_sentiment_score = 0.0
                         post_obj.updated_at = datetime.now(timezone.utc)
                         db_session.add(post_obj)
+                        analyzed_count_in_batch += 1 # Считаем как обработанный, хотя LLM не вызывался
+                        current_progress_info_ref['processed_count'] = analyzed_count_in_batch
+                        # LLM не вызывался, поэтому переходим к логике обновления прогресса
+                    else:
+                        logger.info(f"{log_prefix}  Анализ тональности поста ID {post_obj.id} ({post_obj.link})...")
+                        s_label, s_score = "neutral", 0.0 # По умолчанию
+                        try:
+                            prompt = f"Определи тональность текста (JSON: sentiment_label: [positive,negative,neutral,mixed], sentiment_score: [-1.0,1.0]):\n---\n{text_for_analysis[:settings.LLM_MAX_PROMPT_LENGTH]}\n---\nJSON_RESPONSE:"
+                            llm_response_str = await одиночный_запрос_к_llm(prompt, модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106", температура=0.2, макс_токены=60, is_json_response_expected=True)
+                            if llm_response_str:
+                                try:
+                                    data = json.loads(llm_response_str)
+                                    s_label_candidate = data.get("sentiment_label")
+                                    s_score_candidate_raw = data.get("sentiment_score")
+                                    if s_label_candidate in ["positive", "negative", "neutral", "mixed"]: s_label = s_label_candidate
+                                    else: logger.warning(f"{log_prefix}    LLM вернул невалидный sentiment_label '{s_label_candidate}' для поста ID {post_obj.id}. Установлен 'neutral'. Ответ: {llm_response_str}"); s_label = "neutral"
+                                    if isinstance(s_score_candidate_raw, (int, float)) and -1.0 <= float(s_score_candidate_raw) <= 1.0: s_score = float(s_score_candidate_raw)
+                                    else: logger.warning(f"{log_prefix}    LLM вернул некорректный sentiment_score '{s_score_candidate_raw}' для поста ID {post_obj.id}. Установлен 0.0. Ответ: {llm_response_str}"); s_score = 0.0
+                                    if s_label_candidate is None and s_score_candidate_raw is None : s_label = "neutral" # Оба отсутствуют, считаем neutral
+                                except (json.JSONDecodeError, TypeError, ValueError) as e_json: logger.error(f"{log_prefix}    Ошибка парсинга JSON от LLM для поста ID {post_obj.id} ({type(e_json).__name__}: {e_json}). Ответ LLM: '{llm_response_str}'")
+                            else: logger.warning(f"{log_prefix}    LLM вернул пустой ответ для анализа тональности поста ID {post_obj.id}. Устанавливаем 'neutral'.")
+                        except OpenAIError as e_llm_sentiment:
+                            logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при анализе тональности поста ID {post_obj.id}: {type(e_llm_sentiment).__name__} - {e_llm_sentiment}");
+                            # Пропускаем этот пост, он останется без анализа тональности для этой попытки
+                            # Обновление прогресса произойдет на следующей итерации или в конце
+                            continue
+                        except Exception as e_sa_general:
+                            logger.error(f"{log_prefix}    !!! Неожиданная ошибка при анализе тональности поста ID {post_obj.id}: {type(e_sa_general).__name__} - {e_sa_general}", exc_info=True);
+                            continue # Пропускаем этот пост
+
+                        post_obj.post_sentiment_label = s_label
+                        post_obj.post_sentiment_score = s_score
+                        post_obj.updated_at = datetime.now(timezone.utc)
+                        db_session.add(post_obj)
                         analyzed_count_in_batch += 1
-                        continue
-                    logger.info(f"{log_prefix}  Анализ тональности поста ID {post_obj.id} ({post_obj.link})...")
-                    s_label, s_score = "neutral", 0.0
-                    try:
-                        prompt = f"Определи тональность текста (JSON: sentiment_label: [positive,negative,neutral,mixed], sentiment_score: [-1.0,1.0]):\n---\n{text_for_analysis[:settings.LLM_MAX_PROMPT_LENGTH]}\n---\nJSON_RESPONSE:"
-                        llm_response_str = await одиночный_запрос_к_llm(prompt, модель=settings.OPENAI_DEFAULT_MODEL_FOR_TASKS or "gpt-3.5-turbo-1106", температура=0.2, макс_токены=60, is_json_response_expected=True)
-                        if llm_response_str:
-                            try:
-                                data = json.loads(llm_response_str)
-                                s_label_candidate = data.get("sentiment_label")
-                                s_score_candidate_raw = data.get("sentiment_score")
-                                if s_label_candidate in ["positive", "negative", "neutral", "mixed"]: s_label = s_label_candidate
-                                else: logger.warning(f"{log_prefix}    LLM вернул невалидный sentiment_label '{s_label_candidate}' для поста ID {post_obj.id}. Установлен 'neutral'. Ответ: {llm_response_str}"); s_label = "neutral"
-                                if isinstance(s_score_candidate_raw, (int, float)) and -1.0 <= float(s_score_candidate_raw) <= 1.0: s_score = float(s_score_candidate_raw)
-                                else: logger.warning(f"{log_prefix}    LLM вернул некорректный sentiment_score '{s_score_candidate_raw}' для поста ID {post_obj.id}. Установлен 0.0. Ответ: {llm_response_str}"); s_score = 0.0
-                                if s_label_candidate is None and s_score_candidate_raw is None : s_label = "neutral"
-                            except (json.JSONDecodeError, TypeError, ValueError) as e_json: logger.error(f"{log_prefix}    Ошибка парсинга JSON от LLM для поста ID {post_obj.id} ({type(e_json).__name__}: {e_json}). Ответ LLM: '{llm_response_str}'")
-                        else: logger.warning(f"{log_prefix}    LLM вернул пустой ответ для анализа тональности поста ID {post_obj.id}. Устанавливаем 'neutral'.")
-                    except OpenAIError as e_llm_sentiment: logger.error(f"{log_prefix}    !!! Ошибка OpenAI API при анализе тональности поста ID {post_obj.id}: {type(e_llm_sentiment).__name__} - {e_llm_sentiment}"); continue 
-                    except Exception as e_sa_general: logger.error(f"{log_prefix}    !!! Неожиданная ошибка при анализе тональности поста ID {post_obj.id}: {type(e_sa_general).__name__} - {e_sa_general}", exc_info=True); continue
-                    post_obj.post_sentiment_label = s_label; post_obj.post_sentiment_score = s_score; post_obj.updated_at = datetime.now(timezone.utc); db_session.add(post_obj); analyzed_count_in_batch += 1
-                    logger.info(f"{log_prefix}    Тональность поста ID {post_obj.id}: {s_label} ({s_score:.2f}) сохранена.")
-                
-                if analyzed_count_in_batch > 0:
+                        current_progress_info_ref['processed_count'] = analyzed_count_in_batch
+                        logger.info(f"{log_prefix}    Тональность поста ID {post_obj.id}: {s_label} ({s_score:.2f}) сохранена.")
+
+                    # Обновление состояния прогресса периодически или в конце
+                    # i - индекс текущего поста, analyzed_count_in_batch - сколько фактически проанализировано (или помечено neutral)
+                    # Используем i+1 для проверки "каждый 10-й *просмотренный* пост"
+                    if (i + 1) % 10 == 0 or (i + 1) == total_posts_for_batch:
+                        # Прогресс считаем от общего числа постов, которые *должны быть* обработаны
+                        current_progress_percentage = 10 + int(((i + 1) / total_posts_for_batch) * 85) if total_posts_for_batch > 0 else 95
+                        current_progress_info_ref.update({
+                            'current_step': f'Анализ тональности: обработано {analyzed_count_in_batch}/{total_posts_for_batch} (просмотрено {i+1})',
+                            'progress': current_progress_percentage
+                        })
+                        task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
+                # Коммит, если были какие-либо изменения (проанализированные или помеченные как neutral пустые посты)
+                if analyzed_count_in_batch > 0 or any(
+                    (p.post_sentiment_label == "neutral" and not p.text_content and not p.caption_text) for p in posts_to_process
+                ):
                     await db_session.commit()
-                    logger.info(f"{log_prefix}  Проанализировано и обновлено {analyzed_count_in_batch} постов в этой пачке.")
-            
-            return f"Анализ тональности для пачки завершен. Обработано: {analyzed_count_in_batch} постов."
+                    logger.info(f"{log_prefix}  Обновлено {current_progress_info_ref['processed_count']} постов в этой пачке (включая помеченные neutral).")
+
+
+            result_message = f"Анализ тональности для пачки завершен. Обработано (с LLM или помечено neutral): {current_progress_info_ref['processed_count']} из {total_posts_for_batch} постов."
+            current_progress_info_ref.update({
+                'current_step': 'Завершено',
+                'progress': 100,
+                'result_summary': result_message
+            })
+            task_instance.update_state(state='SUCCESS', meta=current_progress_info_ref)
+            return result_message
         except Exception as e_async_main:
             logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в _async_logic: {type(e_async_main).__name__} - {e_async_main}", exc_info=True)
+            current_progress_info_ref.update({
+                'current_step': f'Критическая ошибка в async_logic: {type(e_async_main).__name__}',
+                'error': str(e_async_main)
+            })
             raise
-        finally: 
+        finally:
             if local_engine:
                 logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
                 await local_engine.dispose()
 
     try:
-        result_message = asyncio.run(_async_logic())
+        result_message = asyncio.run(_async_logic(self, progress_info_ref))
         task_duration = time.time() - task_start_time
         logger.info(f"{log_prefix} Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
+        # Состояние SUCCESS уже установлено внутри _async_logic
         return result_message
     except Exception as e_task_main:
         task_duration = time.time() - task_start_time
         logger.error(f"{log_prefix} !!! КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_main).__name__} - {e_task_main}", exc_info=True)
+
+        failure_meta = {
+            'current_step': progress_info_ref.get('current_step', 'Ошибка анализа тональности'),
+            'error': str(e_task_main),
+            'progress': progress_info_ref.get('progress', 0),
+            'processed_count': progress_info_ref.get('processed_count', 0),
+            'total_to_process': progress_info_ref.get('total_to_process', 0)
+        }
+        failure_meta['progress'] = 100 # Задача дошла до конца (с ошибкой)
+        failure_meta['current_step'] = f"Ошибка: {failure_meta['current_step']}"
+
+
+        self.update_state(state='FAILURE', meta=failure_meta)
+
         try:
             if self.request.retries < self.max_retries:
+                logger.info(f"{log_prefix} Попытка повтора задачи {self.request.id} ({self.request.retries + 1}/{self.max_retries}). Задержка: {int(self.default_retry_delay * (2 ** self.request.retries))} сек.")
                 raise self.retry(exc=e_task_main, countdown=int(self.default_retry_delay * (2 ** self.request.retries)))
             else:
                 logger.error(f"{log_prefix} Celery: Max retries ({self.max_retries}) достигнуто для таска {self.request.id}.")
-                raise e_task_main 
+                # ИЗМЕНЕНО: убран return. Celery сам обработает статус FAILURE.
+                # Метаданные уже установлены через self.update_state.
+                # Если здесь будет return, статус может стать SUCCESS.
+                # Исключение e_task_main "выпадет" из задачи, и Celery обработает его.
         except Exception as e_retry_logic:
             logger.error(f"{log_prefix} Celery: Исключение в логике retry для таска {self.request.id}: {type(e_retry_logic).__name__}", exc_info=True)
-            raise e_task_main
+            # Обновляем состояние, если сама логика retry дала сбой
+            self.update_state(state='FAILURE', meta={**failure_meta, 'error': f"Retry logic failed: {str(e_retry_logic)}. Original error: {str(e_task_main)}"})
+            # Позволяем оригинальному или новому исключению "выпасть"
+            raise # Перевыбрасываем, чтобы Celery корректно завершил задачу с FAILURE
 
 @celery_instance.task(name="tasks.analyze_single_comment_ai_features", bind=True, max_retries=2, default_retry_delay=60 * 2)
 def analyze_single_comment_ai_features_task(self, comment_id: int):
@@ -879,48 +1077,60 @@ def analyze_single_comment_ai_features_task(self, comment_id: int):
             logger.error(f"Celery: Исключение в логике retry для таска {self.request.id} (comment_id: {comment_id}): {type(e_retry_logic).__name__}", exc_info=True)
             raise e_task_level
 
-@celery_instance.task(name="tasks.enqueue_comments_for_ai_feature_analysis", bind=True)
+@celery_instance.task(name="tasks.enqueue_comments_for_ai_feature_analysis", bind=True, max_retries=2, default_retry_delay=180) # Уменьшил default_retry_delay
 def enqueue_comments_for_ai_feature_analysis_task(
-    self, 
-    limit_comments_to_queue: Optional[int] = None, 
-    older_than_hours: Optional[int] = None, 
-    channel_id_filter: Optional[int] = None, 
-    process_only_recent_hours: Optional[int] = None, 
+    self,
+    limit_comments_to_queue: Optional[int] = None,
+    older_than_hours: Optional[int] = None,
+    channel_id_filter: Optional[int] = None,
+    process_only_recent_hours: Optional[int] = None,
     comment_ids_to_process: Optional[List[int]] = None,
-    start_date_iso: Optional[str] = None, 
-    end_date_iso: Optional[str] = None   
+    start_date_iso: Optional[str] = None, # Для фильтрации постов, к которым относятся комментарии
+    end_date_iso: Optional[str] = None    # Для фильтрации постов, к которым относятся комментарии
 ):
     actual_limit_comments_to_queue = limit_comments_to_queue if limit_comments_to_queue is not None else settings.COMMENT_ENQUEUE_BATCH_SIZE
     task_start_time = time.time()
     log_prefix_parts = ["[AICommentQueue"]
     if channel_id_filter: log_prefix_parts.append(f"Ch:{channel_id_filter}")
-    if start_date_iso: log_prefix_parts.append(f"Start:{start_date_iso}")
-    if end_date_iso: log_prefix_parts.append(f"End:{end_date_iso}")
+    if start_date_iso: log_prefix_parts.append(f"StartPost:{start_date_iso}") # Уточнил, что это для постов
+    if end_date_iso: log_prefix_parts.append(f"EndPost:{end_date_iso}")     # Уточнил, что это для постов
     if comment_ids_to_process: log_prefix_parts.append(f"IDs:{len(comment_ids_to_process)}")
     if older_than_hours is not None: log_prefix_parts.append(f"OlderThanH:{older_than_hours}")
     if process_only_recent_hours is not None: log_prefix_parts.append(f"RecentH:{process_only_recent_hours}")
     log_prefix = "".join(log_prefix_parts) + "]"
 
     logger.info(f"{log_prefix} Запуск задачи. Лимит пачки (если не заданы ID): {actual_limit_comments_to_queue} (Task ID: {self.request.id})")
-    
-    enqueued_count = 0
-    local_engine = None 
 
-    async def _async_enqueue_logic():
-        nonlocal enqueued_count 
-        nonlocal local_engine   
+    progress_info_ref: Dict[str, Any] = {
+        "processed_count": 0, # Сколько комментариев было поставлено в очередь
+        "total_to_process": 0, # Сколько комментариев было найдено для постановки в очередь
+        "current_step": "Инициализация задачи постановки комментариев в очередь",
+        "progress": 0
+    }
+
+    async def _async_enqueue_logic(task_instance, current_progress_info_ref: Dict[str, Any]):
+        enqueued_count_local = 0 # Используем локальную переменную для _async_logic
+        total_found_for_queue = 0
+        local_engine = None
+
+        current_progress_info_ref.update({
+            'current_step': 'Подготовка к поиску комментариев для очереди',
+            'progress': 5
+        })
+        task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
         try:
-            ASYNC_DB_URL_TASK = settings.DATABASE_URL 
+            ASYNC_DB_URL_TASK = settings.DATABASE_URL
             if not ASYNC_DB_URL_TASK.startswith("postgresql+asyncpg://"):
                 ASYNC_DB_URL_TASK = ASYNC_DB_URL_TASK.replace("postgresql://", "postgresql+asyncpg://", 1)
-            
+
             local_engine = create_async_engine(ASYNC_DB_URL_TASK, echo=False, pool_pre_ping=True)
             LocalAsyncSessionFactory_Task = sessionmaker(
                 bind=local_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
             )
             logger.info(f"{log_prefix} Локальный async_engine и AsyncSessionFactory созданы для задачи.")
 
-            async with LocalAsyncSessionFactory_Task() as db_session: 
+            async with LocalAsyncSessionFactory_Task() as db_session:
                 comment_ids_to_enqueue: List[int] = []
                 if comment_ids_to_process is not None:
                     logger.info(f"{log_prefix} Режим обработки конкретных ID комментариев: {len(comment_ids_to_process)} шт.")
@@ -929,70 +1139,155 @@ def enqueue_comments_for_ai_feature_analysis_task(
                             .where(Comment.id.in_(comment_ids_to_process))\
                             .where(Comment.text_content.isnot(None))\
                             .where(Comment.text_content != "")\
-                            .where(Comment.ai_analysis_completed_at.is_(None))
-                        
+                            .where(Comment.ai_analysis_completed_at.is_(None)) # Только те, что еще не анализировались
+
                         filtered_ids_result = await db_session.execute(stmt_filter_ids)
                         comment_ids_to_enqueue = filtered_ids_result.scalars().all()
                         logger.info(f"{log_prefix} Из переданных {len(comment_ids_to_process)} ID, {len(comment_ids_to_enqueue)} подходят для AI-анализа и будут поставлены в очередь.")
-                    else: 
+                    else:
                         comment_ids_to_enqueue = []
-                else: 
+                else:
+                    # Базовый запрос для комментариев, которые еще не анализировались или устарели
                     stmt = select(Comment.id).where(Comment.text_content.isnot(None)).where(Comment.text_content != "")
-                    
-                    if start_date_iso or end_date_iso or channel_id_filter: 
+
+                    # Присоединяем Post для фильтрации по каналу или датам постов
+                    # Это нужно делать только если есть соответствующие фильтры
+                    needs_join_post = bool(channel_id_filter or start_date_iso or end_date_iso)
+                    if needs_join_post:
                         stmt = stmt.join(Post, Comment.post_id == Post.id)
                         if channel_id_filter:
                             stmt = stmt.where(Post.channel_id == channel_id_filter)
-                        
+
                         if start_date_iso:
-                            dt_start = datetime.fromisoformat(start_date_iso.split('T')[0]).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                            stmt = stmt.where(Post.posted_at >= dt_start) 
+                            dt_start_naive = date.fromisoformat(start_date_iso.split('T')[0])
+                            dt_start = datetime(dt_start_naive.year, dt_start_naive.month, dt_start_naive.day, 0, 0, 0, 0, tzinfo=timezone.utc)
+                            stmt = stmt.where(Post.posted_at >= dt_start)
                             logger.info(f"{log_prefix} Применен фильтр start_date для постов: {dt_start}")
                         if end_date_iso:
-                            dt_end_naive = datetime.fromisoformat(end_date_iso.split('T')[0])
+                            dt_end_naive = date.fromisoformat(end_date_iso.split('T')[0])
                             dt_end = datetime(dt_end_naive.year, dt_end_naive.month, dt_end_naive.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
-                            stmt = stmt.where(Post.posted_at <= dt_end) 
+                            stmt = stmt.where(Post.posted_at <= dt_end)
                             logger.info(f"{log_prefix} Применен фильтр end_date для постов: {dt_end}")
-                    
+
+                    # Фильтры по времени комментирования и статусу анализа
                     if process_only_recent_hours is not None and process_only_recent_hours > 0:
-                        time_threshold_recent = datetime.now(timezone.utc) - timedelta(hours=process_only_recent_hours); stmt = stmt.where(Comment.commented_at >= time_threshold_recent); stmt = stmt.where(Comment.ai_analysis_completed_at.is_(None)); stmt = stmt.order_by(Comment.commented_at.desc()); logger.info(f"{log_prefix} Режим недавних: за {process_only_recent_hours}ч.")
-                    else: 
+                        time_threshold_recent = datetime.now(timezone.utc) - timedelta(hours=process_only_recent_hours)
+                        stmt = stmt.where(Comment.commented_at >= time_threshold_recent)
+                        stmt = stmt.where(Comment.ai_analysis_completed_at.is_(None)) # Только не проанализированные
+                        stmt = stmt.order_by(Comment.commented_at.desc()) # Сначала самые новые
+                        logger.info(f"{log_prefix} Режим недавних: за {process_only_recent_hours}ч, только непроанализированные.")
+                    else:
                         if older_than_hours is not None:
-                            time_threshold_older = datetime.now(timezone.utc) - timedelta(hours=older_than_hours); stmt = stmt.where((Comment.ai_analysis_completed_at.is_(None)) | (Comment.ai_analysis_completed_at < time_threshold_older))
+                            # Анализируем те, что не анализировались ИЛИ те, чей анализ устарел
+                            time_threshold_older = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+                            stmt = stmt.where(
+                                or_(
+                                    Comment.ai_analysis_completed_at.is_(None),
+                                    Comment.ai_analysis_completed_at < time_threshold_older
+                                )
+                            )
+                            logger.info(f"{log_prefix} Режим бэклога с переанализом старых (старше {older_than_hours}ч).")
                         else:
+                            # Только те, что еще не анализировались
                             stmt = stmt.where(Comment.ai_analysis_completed_at.is_(None))
-                        stmt = stmt.order_by(Comment.commented_at.asc()) 
-                        logger.info(f"{log_prefix} Режим бэклога или общего анализа (с возможным фильтром по датам постов).")
-                    
+                            logger.info(f"{log_prefix} Режим бэклога (только непроанализированные).")
+                        stmt = stmt.order_by(Comment.commented_at.asc()) # Сначала самые старые из подходящих
+
                     stmt = stmt.limit(actual_limit_comments_to_queue)
                     comment_ids_result = await db_session.execute(stmt)
                     comment_ids_to_enqueue = comment_ids_result.scalars().all()
 
+                total_found_for_queue = len(comment_ids_to_enqueue)
+                current_progress_info_ref['total_to_process'] = total_found_for_queue
+
+                logger.info(f"{log_prefix} Найдено {total_found_for_queue} комментариев для очереди.")
+                current_progress_info_ref.update({
+                    'current_step': f'Найдено {total_found_for_queue} комментариев для постановки в очередь',
+                    'progress': 20 # Увеличили начальный прогресс
+                })
+                task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
+
                 if not comment_ids_to_enqueue:
                     logger.info(f"{log_prefix} Не найдено комментариев для очереди по заданным критериям.")
-                    return "No comments found to queue."
-                
-                logger.info(f"{log_prefix} Найдено {len(comment_ids_to_enqueue)} комментариев для очереди. Запускаю задачи детального анализа...")
-                for comment_id_to_process in comment_ids_to_enqueue:
+                    result_message = "No comments found to queue."
+                    current_progress_info_ref.update({
+                        'current_step': 'Завершено: нет комментариев для очереди',
+                        'progress': 100,
+                        'result_summary': result_message
+                    })
+                    task_instance.update_state(state='SUCCESS', meta=current_progress_info_ref)
+                    return result_message
+
+                logger.info(f"{log_prefix} Начинаю постановку в очередь {total_found_for_queue} комментариев...")
+                for i, comment_id_to_process in enumerate(comment_ids_to_enqueue):
                     analyze_single_comment_ai_features_task.delay(comment_id_to_process)
-                    enqueued_count += 1
-                return f"Successfully enqueued {enqueued_count} comments for detailed AI analysis."
+                    enqueued_count_local += 1
+                    current_progress_info_ref['processed_count'] = enqueued_count_local
+
+                    if (i + 1) % 20 == 0 or (i + 1) == total_found_for_queue: # Обновляем каждые 20 или в конце
+                        current_progress_percentage = 20 + int(((i + 1) / total_found_for_queue) * 75) if total_found_for_queue > 0 else 95
+                        current_progress_info_ref.update({
+                            'current_step': f'Постановка в очередь: {enqueued_count_local}/{total_found_for_queue}',
+                            'progress': current_progress_percentage
+                        })
+                        task_instance.update_state(state='PROGRESS', meta=current_progress_info_ref)
+
+                result_message = f"Successfully enqueued {enqueued_count_local} comments for detailed AI analysis."
+                current_progress_info_ref.update({
+                    'current_step': 'Завершено',
+                    'progress': 100,
+                    'result_summary': result_message
+                })
+                task_instance.update_state(state='SUCCESS', meta=current_progress_info_ref)
+                return result_message
+
         except Exception as e_enqueue:
             logger.error(f"{log_prefix} Ошибка в _async_enqueue_logic: {type(e_enqueue).__name__} - {e_enqueue}", exc_info=True)
-            raise
-        finally: 
+            current_progress_info_ref.update({
+                'current_step': f'Ошибка в async_logic: {type(e_enqueue).__name__}',
+                'error': str(e_enqueue)
+            })
+            raise # Перевыбрасываем для обработки в основной части задачи
+        finally:
             if local_engine:
                 logger.info(f"{log_prefix} Закрытие локального async_engine в finally.")
                 await local_engine.dispose()
 
     try:
-        result_message = asyncio.run(_async_enqueue_logic())
+        result_message = asyncio.run(_async_enqueue_logic(self, progress_info_ref))
         task_duration = time.time() - task_start_time
         logger.info(f"{log_prefix} Celery таск '{self.name}' УСПЕШНО завершен за {task_duration:.2f} сек. Результат: {result_message}")
+        # Состояние SUCCESS уже установлено внутри _async_logic
         return result_message
     except Exception as e_task_level:
-        task_duration = time.time() - task_start_time; logger.error(f"{log_prefix} !!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True); raise e_task_level
+        task_duration = time.time() - task_start_time
+        logger.error(f"{log_prefix} !!! Celery: КРИТИЧЕСКАЯ ОШИБКА в таске '{self.name}' (за {task_duration:.2f} сек): {type(e_task_level).__name__} {e_task_level}", exc_info=True)
+        
+        failure_meta = {
+            'current_step': progress_info_ref.get('current_step', 'Ошибка постановки комментариев в очередь'),
+            'error': str(e_task_level),
+            'progress': progress_info_ref.get('progress', 0),
+            'processed_count': progress_info_ref.get('processed_count', 0),
+            'total_to_process': progress_info_ref.get('total_to_process', 0)
+        }
+        failure_meta['progress'] = 100 # Задача дошла до конца (с ошибкой)
+        failure_meta['current_step'] = f"Ошибка: {failure_meta['current_step']}"
 
+        self.update_state(state='FAILURE', meta=failure_meta)
+
+        try:
+            if self.request.retries < self.max_retries:
+                logger.info(f"{log_prefix} Попытка повтора задачи {self.request.id} ({self.request.retries + 1}/{self.max_retries}). Задержка: {int(self.default_retry_delay * (2 ** self.request.retries))} сек.")
+                raise self.retry(exc=e_task_level, countdown=int(self.default_retry_delay * (2 ** self.request.retries)))
+            else:
+                logger.error(f"{log_prefix} Celery: Max retries ({self.max_retries}) достигнуто для таска {self.request.id}.")
+                # Исключение e_task_level "выпадет", Celery обработает его.
+        except Exception as e_retry_logic: # Ловим исключения из self.retry
+            logger.error(f"{log_prefix} Celery: Исключение в логике retry для таска {self.request.id}: {type(e_retry_logic).__name__}", exc_info=True)
+            # Убеждаемся, что состояние FAILURE установлено, если сама логика retry падает
+            self.update_state(state='FAILURE', meta={**failure_meta, 'error': f"Retry logic failed: {str(e_retry_logic)}. Original error: {str(e_task_level)}"})
+            raise # Перевыбрасываем, чтобы Celery корректно завершил задачу с FAILURE
 
 @celery_instance.task(name="tasks.advanced_data_refresh", bind=True, max_retries=2, default_retry_delay=60 * 10)
 def advanced_data_refresh_task(

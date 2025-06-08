@@ -17,23 +17,23 @@ const fetchData = async (url, options = {}) => {
       let errorDetail = `Ошибка HTTP: ${response.status} ${response.statusText}`;
       try {
         const errorData = await response.json();
-        errorDetail = errorData.detail || errorData.message || errorDetail; 
-        if (Array.isArray(errorData.detail)) { 
+        errorDetail = errorData.detail || errorData.message || errorDetail;
+        if (Array.isArray(errorData.detail)) {
           errorDetail = errorData.detail.map(err => `${err.loc.join('.')} - ${err.msg}`).join('; ');
         }
-      } catch (e) { 
+      } catch (e) {
         console.warn(`[apiService] Could not parse error response body as JSON for URL: ${url}`);
       }
       throw new Error(errorDetail);
     }
     const contentType = response.headers.get("content-type");
     if (response.status === 204 || !contentType || !contentType.includes("application/json")) {
-        return null; 
+        return null;
     }
     return await response.json();
   } catch (error) {
     console.error(`[apiService] Ошибка fetch для URL ${url}:`, error.message);
-    throw error; 
+    throw error;
   }
 };
 
@@ -41,8 +41,8 @@ const fetchData = async (url, options = {}) => {
  * Загружает список постов с пагинацией, опциональным поисковым запросом и сортировкой.
  */
 export const fetchPostsAPI = async (
-  page = 1, 
-  searchQuery = null, 
+  page = 1,
+  searchQuery = null,
   sortBy = DEFAULT_SORT_BY,
   sortOrder = DEFAULT_SORT_ORDER
 ) => {
@@ -176,13 +176,13 @@ export const postNLQueryAPI = async (queryText, contextParams = {}) => {
     console.error("[apiService] postNLQueryAPI: queryText не может быть пустым.");
     throw new Error("Текст запроса не может быть пустым.");
   }
-  
+
   const payload = {
     query_text: queryText,
     ...contextParams // Добавляем опциональные параметры контекста, если они есть
   };
 
-  const url = `${API_BASE_URL}/natural_language_query/`; 
+  const url = `${API_BASE_URL}/natural_language_query/`;
   return fetchData(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -190,10 +190,10 @@ export const postNLQueryAPI = async (queryText, contextParams = {}) => {
   });
 };
 
-// --- НАЧАЛО: НОВАЯ ФУНКЦИЯ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
+// --- НАЧАЛО: ФУНКЦИЯ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
 /**
  * Запускает задачу продвинутого обновления данных на бэкенде.
- * @param {object} refreshParams - Объект с параметрами для обновления, 
+ * @param {object} refreshParams - Объект с параметрами для обновления,
  *                                 соответствующий схеме AdvancedDataRefreshRequest на бэкенде.
  * @returns {Promise<object>} - Ответ от API, обычно содержащий task_id.
  */
@@ -205,9 +205,74 @@ export const runAdvancedDataRefreshAPI = async (refreshParams) => {
     body: JSON.stringify(refreshParams),
   });
 };
-// --- КОНЕЦ: НОВАЯ ФУНКЦИЯ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
+// --- КОНЕЦ: ФУНКЦИЯ ДЛЯ ПРОДВИНУТОГО ОБНОВЛЕНИЯ ДАННЫХ ---
 
-// --- Функции для запуска других Celery задач (если они еще не были добавлены) ---
+
+// --- НАЧАЛО: ФУНКЦИИ ДЛЯ ПАКЕТНОГО И ПЕРИОДИЧЕСКОГО AI-АНАЛИЗА ---
+/**
+ * Запускает задачу пакетного AI-анализа (тональность, суммаризация, фичи комментариев).
+ * @param {object} analysisParams - Параметры для анализа (например, { channel_ids: [...] }).
+ *                                  Соответствует схеме BatchedAIAnalysisRequest на бэкенде.
+ * @returns {Promise<object>} - Ответ от API, содержащий task_id(s).
+ */
+export const runBatchedAIAnalysisAPI = async (analysisParams) => {
+  const url = `${API_BASE_URL}/run-batched-ai-analysis/`;
+  return fetchData(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(analysisParams),
+  });
+};
+
+/**
+ * Запускает AI-анализ постов за указанный период.
+ * @param {object} analysisParams - Параметры для анализа (например, { channel_ids: [...], start_date_str: "YYYY-MM-DD", end_date_str: "YYYY-MM-DD" }).
+ *                                  Соответствует схеме PeriodicalPostAnalysisRequest на бэкенде.
+ * @returns {Promise<object>} - Ответ от API, содержащий task_id(s).
+ */
+export const runPeriodicalPostAnalysisAPI = async (analysisParams) => {
+  const url = `${API_BASE_URL}/run-periodical-post-analysis/`;
+  return fetchData(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(analysisParams),
+  });
+};
+
+/**
+ * Запускает AI-анализ комментариев к постам за указанный период.
+ * @param {object} analysisParams - Параметры для анализа (например, { channel_ids: [...], start_date_str: "YYYY-MM-DD", end_date_str: "YYYY-MM-DD" }).
+ *                                  Соответствует схеме PeriodicalCommentAnalysisRequest на бэкенде.
+ * @returns {Promise<object>} - Ответ от API, содержащий task_id(s).
+ */
+export const runPeriodicalCommentAnalysisAPI = async (analysisParams) => {
+  const url = `${API_BASE_URL}/run-periodical-comment-analysis/`;
+  return fetchData(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(analysisParams),
+  });
+};
+
+/**
+ * Запускает генерацию аналитического отчета за период.
+ * @param {object} reportParams - Параметры для отчета (например, { channel_ids: [...], start_date_str: "YYYY-MM-DD", end_date_str: "YYYY-MM-DD", top_n_insights: 5 }).
+ *                               Соответствует схеме AnalyticalReportRequest на бэкенде.
+ * @returns {Promise<object>} - Ответ от API, содержащий текст отчета.
+ */
+export const generateAnalyticalReportAPI = async (reportParams) => {
+  const url = `${API_BASE_URL}/generate-analytical-report/`;
+  return fetchData(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(reportParams),
+  });
+};
+
+// --- КОНЕЦ: ФУНКЦИИ ДЛЯ ПАКЕТНОГО И ПЕРИОДИЧЕСКОГО AI-АНАЛИЗА ---
+
+
+// --- Функции для запуска "старых" Celery задач (если они еще не были добавлены/заменены новыми) ---
 /**
  * Запускает задачу сбора данных.
  */
@@ -217,7 +282,7 @@ export const runCollectionTaskAPI = async () => {
 };
 
 /**
- * Запускает задачу суммаризации постов.
+ * Запускает задачу суммаризации постов. (Возможно, будет заменена/дополнена runBatchedAIAnalysisAPI)
  */
 export const runSummarizationTaskAPI = async () => {
   const url = `${API_BASE_URL}/run-summarization-task/`;
@@ -233,7 +298,7 @@ export const runDailyDigestTaskAPI = async () => {
 };
 
 /**
- * Запускает задачу анализа тональности постов.
+ * Запускает задачу анализа тональности постов. (Возможно, будет заменена/дополнена runBatchedAIAnalysisAPI)
  */
 export const runSentimentAnalysisTaskAPI = async () => {
   const url = `${API_BASE_URL}/run-sentiment-analysis-task/`;
@@ -241,10 +306,28 @@ export const runSentimentAnalysisTaskAPI = async () => {
 };
 
 /**
- * Запускает задачу AI-анализа фич комментариев.
+ * Запускает задачу AI-анализа фич комментариев. (Возможно, будет заменена/дополнена runBatchedAIAnalysisAPI)
  * @param {number} limit - Количество комментариев для постановки в очередь.
  */
 export const runCommentFeatureAnalysisAPI = async (limit = 100) => {
   const url = `${API_BASE_URL}/run-comment-feature-analysis/?limit=${limit}`;
   return fetchData(url, { method: 'POST' });
 };
+
+// --- НАЧАЛО: НОВАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ СТАТУСА ЗАДАЧИ ---
+/**
+ * Получает статус Celery задачи по её ID.
+ * @param {string} taskId - ID задачи.
+ * @returns {Promise<object>} - Ответ от API со статусом и метаданными задачи.
+ */
+export const fetchTaskStatusAPI = async (taskId) => {
+  if (!taskId) {
+    // Можно выбросить ошибку или вернуть Promise.reject
+    console.error("[apiService] fetchTaskStatusAPI: taskId не может быть пустым.");
+    throw new Error("Task ID не может быть пустым для запроса статуса.");
+    // Или: return Promise.reject(new Error("Task ID не может быть пустым для запроса статуса."));
+  }
+  const url = `${API_BASE_URL}/task-status/${taskId}`;
+  return fetchData(url); // fetchData уже обрабатывает ошибки и JSON
+};
+// --- КОНЕЦ: НОВАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ СТАТУСА ЗАДАЧИ ---

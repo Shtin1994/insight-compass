@@ -10,7 +10,7 @@ function ChannelManagementPage() {
   const [channels, setChannels] = useState([]);
   const [isLoadingList, setIsLoadingList] = useState(true);
   const [listError, setListError] = useState(null);
-  
+
   const [isAddingChannel, setIsAddingChannel] = useState(false);
   const [itemLoadingStates, setItemLoadingStates] = useState({ toggle: null, delete: null });
 
@@ -18,11 +18,12 @@ function ChannelManagementPage() {
     setIsLoadingList(true);
     setListError(null);
     try {
-      const response = await fetchChannelsAPI(1, 100); // Загружаем до 100 каналов
+      // Загружаем до 100 каналов, можно увеличить или добавить пагинацию для ChannelList
+      const response = await fetchChannelsAPI(1, 100); 
       setChannels(response.channels || []);
     } catch (err) {
       setListError(err.message || 'Не удалось загрузить список каналов.');
-      setChannels([]);
+      setChannels([]); // Убедимся, что channels - это массив при ошибке
     } finally {
       setIsLoadingList(false);
     }
@@ -36,10 +37,12 @@ function ChannelManagementPage() {
     setIsAddingChannel(true);
     try {
       await addChannelAPI(identifier);
-      loadChannels(); 
+      loadChannels();
     } catch (err) {
       console.error("Ошибка при добавлении канала:", err);
-      throw err; 
+      // Ошибка будет отображена в AddChannelForm, если она оттуда пробрасывается и обрабатывается
+      // Если нет, можно установить listError здесь или специфичное сообщение
+      throw err; // Пробрасываем, чтобы AddChannelForm мог ее поймать и отобразить
     } finally {
       setIsAddingChannel(false);
     }
@@ -55,6 +58,8 @@ function ChannelManagementPage() {
         )
       );
     } catch (err) {
+      // Можно отобразить ошибку более заметно, например, через toast уведомление
+      console.error(`Не удалось изменить статус канала ${channelId}:`, err);
       alert(`Не удалось изменить статус канала: ${err.message}`);
     } finally {
       setItemLoadingStates(prev => ({ ...prev, toggle: null }));
@@ -62,15 +67,13 @@ function ChannelManagementPage() {
   };
 
   const handleDeleteChannel = async (channelId) => {
-    // В текущей реализации API deleteChannelAPI деактивирует канал, а не удаляет.
-    // Если нужно полное удаление из БД, API и логика здесь должны быть другими.
-    // Пока что это будет работать как деактивация.
     if (window.confirm('Вы уверены, что хотите деактивировать этот канал? Сбор данных по нему прекратится.')) {
         setItemLoadingStates(prev => ({ ...prev, delete: channelId }));
         try {
-          await deleteChannelAPI(channelId); // Этот эндпоинт деактивирует канал
-          loadChannels(); // Перезагружаем список, чтобы отразить статус is_active=false
+          await deleteChannelAPI(channelId);
+          loadChannels(); 
         } catch (err) {
+          console.error(`Не удалось деактивировать канал ${channelId}:`, err);
           alert(`Не удалось деактивировать канал: ${err.message}`);
         } finally {
           setItemLoadingStates(prev => ({ ...prev, delete: null }));
@@ -80,7 +83,7 @@ function ChannelManagementPage() {
 
   return (
     <div className="channel-management-page">
-      <h2>Управление Telegram-каналами</h2>
+      <h2>Управление Telegram-каналами и данными</h2>
       
       <div className="page-section add-channel-section">
         <AddChannelForm onAddChannel={handleAddChannel} isLoading={isAddingChannel} />
@@ -92,17 +95,25 @@ function ChannelManagementPage() {
         <ChannelList
           channels={channels}
           onToggleActive={handleToggleActive}
-          onDelete={handleDeleteChannel} // Переименовал проп для ясности, что это деактивация
+          onDelete={handleDeleteChannel}
           isLoading={isLoadingList}
           loadingStates={itemLoadingStates}
         />
       </div>
 
-      {/* --- НАЧАЛО: Интеграция формы продвинутого обновления --- */}
-      <div className="page-section advanced-refresh-section">
-        <AdvancedDataRefreshForm />
+      <div className="page-section advanced-tasks-section">
+        <h3 className="section-title">Задачи по сбору данных</h3>
+        
+        {/* --- Форма для Кнопки 1: Сбор и обновление постов --- */}
+        <div className="task-form-wrapper">
+            <AdvancedDataRefreshForm formType="collectPosts" />
+        </div>
+
+        {/* --- Форма для Кнопки 2: Сбор и обновление комментариев --- */}
+        <div className="task-form-wrapper">
+            <AdvancedDataRefreshForm formType="collectComments" />
+        </div>
       </div>
-      {/* --- КОНЕЦ: Интеграция формы продвинутого обновления --- */}
 
     </div>
   );
